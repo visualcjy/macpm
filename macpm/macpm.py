@@ -863,6 +863,7 @@ def get_avg(inlist):
     return avg
 
 def begin(stdscr):
+    curses.use_default_colors()
     soc_info_dict = get_soc_info()
     view1 = None
     stdscr.nodelay(True)
