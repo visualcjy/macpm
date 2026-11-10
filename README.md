@@ -4,10 +4,23 @@
 macpm 2.0 reads the same hardware counters as `powermetrics`, but through
 IOReport/IOKit/SMC — no `sudo`, no password, no privileged helper.
 
-![macpm](https://raw.githubusercontent.com/visualcjy/macpm/main/images/macpm-v.gif)
-
 A Python-based `nvtop`-inspired terminal monitor for Apple Silicon Macs,
 forked from [asitop](https://github.com/tlkh/asitop).
+
+## Demo
+
+Default view — CPU/GPU/ANE utilisation and power, memory, disk I/O and
+network, updating once per second:
+
+![macpm default view](https://raw.githubusercontent.com/visualcjy/macpm/main/images/macpm_v.gif)
+
+Same view in another colour theme (press ← / → to cycle through them):
+
+![macpm cyan colour theme](https://raw.githubusercontent.com/visualcjy/macpm/main/images/macpm.gif)
+
+Per-core view (`--show_cores`, or press `2` while running):
+
+![macpm per-core view](https://raw.githubusercontent.com/visualcjy/macpm/main/images/v2.png)
 
 ## Highlights
 
