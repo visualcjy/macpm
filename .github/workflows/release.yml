@@ -33,6 +33,10 @@ jobs:
   publish-pypi:
     name: Publish to PyPI (trusted publishing)
     needs: build
+    # Tag pushes only create a GitHub release.  Set the repository variable
+    # PUBLISH_PYPI=true (Settings > Secrets and variables > Actions > Variables)
+    # to publish to PyPI as well.
+    if: vars.PUBLISH_PYPI == 'true'
     runs-on: ubuntu-latest
     environment:
       name: pypi

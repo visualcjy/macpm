@@ -74,8 +74,11 @@ git push origin main
 git push origin v2.0
 ```
 
-The `Release` workflow builds the sdist/wheel, checks metadata, publishes to
-PyPI (trusted publishing) and attaches the artifacts to a GitHub release.
+The `Release` workflow builds the sdist/wheel, checks metadata and attaches
+the artifacts to a GitHub release.  The PyPI job is opt-in: set the repository
+variable `PUBLISH_PYPI=true` (Settings → Secrets and variables → Actions →
+Variables) to publish to PyPI via trusted publishing.  Leaving it unset keeps
+tag pushes to a GitHub release only.
 If you prefer a manual release, create one from the tag and upload
 `dist/*.whl`, `dist/*.tar.gz` and the standalone tarball.
 
