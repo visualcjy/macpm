@@ -76,6 +76,18 @@ q / ESC     quit
 Ctrl+R      reset peaks
 ```
 
+## Colour themes
+
+Pick one with `--color N`, or press ← / → while macpm is running.  The default
+is `2` (green).
+
+| | |
+|---|---|
+| **1 — red**<br>![colour 1: red](https://raw.githubusercontent.com/visualcjy/macpm/main/images/4.png) | **2 — green (default)**<br>![colour 2: green](https://raw.githubusercontent.com/visualcjy/macpm/main/images/5.png) |
+| **3 — yellow**<br>![colour 3: yellow](https://raw.githubusercontent.com/visualcjy/macpm/main/images/6.png) | **4 — blue**<br>![colour 4: blue](https://raw.githubusercontent.com/visualcjy/macpm/main/images/7.png) |
+| **5 — magenta**<br>![colour 5: magenta](https://raw.githubusercontent.com/visualcjy/macpm/main/images/8.png) | **6 — cyan**<br>![colour 6: cyan](https://raw.githubusercontent.com/visualcjy/macpm/main/images/1.png) |
+| **7 — white**<br>![colour 7: white](https://raw.githubusercontent.com/visualcjy/macpm/main/images/2.png) | **8 — grey**<br>![colour 8: grey](https://raw.githubusercontent.com/visualcjy/macpm/main/images/3.png) |
+
 ## Why no sudo?
 
 macpm 0.x called `sudo powermetrics`. In 2.0 the sampler reads the underlying
