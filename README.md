@@ -35,19 +35,7 @@ Per-core view (`--show_cores`, or press `2` while running):
 
 ## Install
 
-Requirements: **Apple Silicon Mac**, **macOS 12+**. Homebrew and the standalone
-binaries need no Python; `pip` needs Python 3.9+.
-
-### Homebrew
-
-```sh
-brew install visualcjy/macpm/macpm
-```
-
-Installs the prebuilt arm64 `macpm` and `macpm-sensors` into
-`/opt/homebrew/bin`; upgrade with `brew update && brew upgrade macpm`.
-
-### pip
+Requirements: **Apple Silicon Mac**, **macOS 12+**, **Python 3.9+**.
 
 ```sh
 python3 -m pip install --upgrade macpm
