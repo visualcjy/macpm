@@ -1,0 +1,6 @@
+#!/bin/sh
+# Run macpm from the repository without installing it.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+cd "$root"
+exec "${PYTHON:-python3}" -m macpm "$@"

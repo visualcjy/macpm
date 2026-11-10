@@ -1,34 +1,49 @@
 import argparse
-import humanize
-from collections import deque
-from dashing import VSplit, HSplit, HGauge, HChart, VGauge, HBrailleChart, HBrailleFilledChart
-import os, time
-import subprocess
-from subprocess import PIPE
-import psutil
-import plistlib
 import curses
+import math
+import os
+import time
+from collections import deque
 
-version = 'macpm v0.24'
+import humanize
+import psutil
+from dashing import VSplit, HSplit, HGauge, HChart, VGauge, HBrailleChart, HBrailleFilledChart
+
+from .sampler import Sampler
+
+version = 'macpm v2.0'
+
+
+def _bool(value):
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in ('1', 'true', 'yes', 'on')
+
+
 parser = argparse.ArgumentParser(
-    description=f'{version}: Performance monitoring CLI tool for Apple Silicon')
+    prog='macpm',
+    description=f'{version}: rootless performance monitoring CLI tool for Apple Silicon')
 parser.add_argument('--interval', type=int, default=1,
-                    help='Display interval and sampling interval for powermetrics (seconds)')
+                    help='Display interval and sampling interval (seconds)')
 parser.add_argument('--color', type=int, default=2,
                     help='Choose display color (0~8)')
 parser.add_argument('--avg', type=int, default=30,
                     help='Interval for averaged values (seconds)')
-parser.add_argument('--show_cores', type=bool, default=False,
+parser.add_argument('--show_cores', nargs='?', const=True, default=False, type=_bool,
                     help='Choose show cores mode')
+parser.add_argument('--version', action='version', version=version)
 
 args = parser.parse_args()
 
-powermetrics_process = None
+if args.interval <= 0:
+    parser.error('--interval must be greater than 0')
+if args.avg <= 0:
+    parser.error('--avg must be greater than 0')
+
 
 def clear_console():
     command = 'clear'
     os.system(command)
-
 
 def convert_to_GB(value):
     return round(value/1024/1024/1024, 1)
@@ -59,179 +74,8 @@ def get_ram_metrics_dict():
     }
     return ram_metrics_dict
 
-
-def get_cpu_info():
-    cpu_info = os.popen('sysctl -a | grep machdep.cpu').read()
-    cpu_info_lines = cpu_info.split("\n")
-    data_fields = ["machdep.cpu.brand_string", "machdep.cpu.core_count"]
-    cpu_info_dict = {}
-    for l in cpu_info_lines:
-        for h in data_fields:
-            if h in l:
-                value = l.split(":")[1].strip()
-                cpu_info_dict[h] = value
-    return cpu_info_dict
-
-
-def get_core_counts():
-    cores_info = os.popen('sysctl -a | grep hw.perflevel').read()
-    cores_info_lines = cores_info.split("\n")
-    data_fields = ["hw.perflevel0.logicalcpu", "hw.perflevel1.logicalcpu"]
-    cores_info_dict = {}
-    for l in cores_info_lines:
-        for h in data_fields:
-            if h in l:
-                value = int(l.split(":")[1].strip())
-                cores_info_dict[h] = value
-    return cores_info_dict
-
-
-def get_gpu_cores():
-    try:
-        cores = os.popen(
-            "system_profiler -detailLevel basic SPDisplaysDataType | grep 'Total Number of Cores'").read()
-        cores = int(cores.split(": ")[-1])
-    except:
-        cores = "?"
-    return cores
-
-
-def get_soc_info():
-    cpu_info_dict = get_cpu_info()
-    core_counts_dict = get_core_counts()
-    try:
-        e_core_count = core_counts_dict["hw.perflevel1.logicalcpu"]
-        p_core_count = core_counts_dict["hw.perflevel0.logicalcpu"]
-    except:
-        e_core_count = "?"
-        p_core_count = "?"
-    soc_info = {
-        "name": cpu_info_dict["machdep.cpu.brand_string"],
-        "core_count": int(cpu_info_dict["machdep.cpu.core_count"]),
-        "cpu_max_power": None,
-        "gpu_max_power": None,
-        "cpu_max_bw": None,
-        "gpu_max_bw": None,
-        "e_core_count": e_core_count,
-        "p_core_count": p_core_count,
-        "gpu_core_count": get_gpu_cores()
-    }
-    # TDP (power)
-    if soc_info["name"] == "Apple M1 Max":
-        soc_info["cpu_max_power"] = 30
-        soc_info["gpu_max_power"] = 60
-    elif soc_info["name"] == "Apple M1 Pro":
-        soc_info["cpu_max_power"] = 30
-        soc_info["gpu_max_power"] = 30
-    elif soc_info["name"] == "Apple M1":
-        soc_info["cpu_max_power"] = 20
-        soc_info["gpu_max_power"] = 20
-    elif soc_info["name"] == "Apple M1 Ultra":
-        soc_info["cpu_max_power"] = 60
-        soc_info["gpu_max_power"] = 120
-    elif soc_info["name"] == "Apple M2":
-        soc_info["cpu_max_power"] = 25
-        soc_info["gpu_max_power"] = 15
-    else:
-        soc_info["cpu_max_power"] = 20
-        soc_info["gpu_max_power"] = 20
-    # bandwidth
-    if soc_info["name"] == "Apple M1 Max":
-        soc_info["cpu_max_bw"] = 250
-        soc_info["gpu_max_bw"] = 400
-    elif soc_info["name"] == "Apple M1 Pro":
-        soc_info["cpu_max_bw"] = 200
-        soc_info["gpu_max_bw"] = 200
-    elif soc_info["name"] == "Apple M1":
-        soc_info["cpu_max_bw"] = 70
-        soc_info["gpu_max_bw"] = 70
-    elif soc_info["name"] == "Apple M1 Ultra":
-        soc_info["cpu_max_bw"] = 500
-        soc_info["gpu_max_bw"] = 800
-    elif soc_info["name"] == "Apple M2":
-        soc_info["cpu_max_bw"] = 100
-        soc_info["gpu_max_bw"] = 100
-    else:
-        soc_info["cpu_max_bw"] = 70
-        soc_info["gpu_max_bw"] = 70
-    return soc_info
-
 def parse_thermal_pressure(powermetrics_parse):
     return powermetrics_parse["thermal_pressure"]
-
-
-def parse_bandwidth_metrics(powermetrics_parse):
-    bandwidth_metrics = powermetrics_parse["bandwidth_counters"]
-    bandwidth_metrics_dict = {}
-    data_fields = ["PCPU0 DCS RD", "PCPU0 DCS WR",
-                   "PCPU1 DCS RD", "PCPU1 DCS WR",
-                   "PCPU2 DCS RD", "PCPU2 DCS WR",
-                   "PCPU3 DCS RD", "PCPU3 DCS WR",
-                   "PCPU DCS RD", "PCPU DCS WR",
-                   "ECPU0 DCS RD", "ECPU0 DCS WR",
-                   "ECPU1 DCS RD", "ECPU1 DCS WR",
-                   "ECPU DCS RD", "ECPU DCS WR",
-                   "GFX DCS RD", "GFX DCS WR",
-                   "ISP DCS RD", "ISP DCS WR",
-                   "STRM CODEC DCS RD", "STRM CODEC DCS WR",
-                   "PRORES DCS RD", "PRORES DCS WR",
-                   "VDEC DCS RD", "VDEC DCS WR",
-                   "VENC0 DCS RD", "VENC0 DCS WR",
-                   "VENC1 DCS RD", "VENC1 DCS WR",
-                   "VENC2 DCS RD", "VENC2 DCS WR",
-                   "VENC3 DCS RD", "VENC3 DCS WR",
-                   "VENC DCS RD", "VENC DCS WR",
-                   "JPG0 DCS RD", "JPG0 DCS WR",
-                   "JPG1 DCS RD", "JPG1 DCS WR",
-                   "JPG2 DCS RD", "JPG2 DCS WR",
-                   "JPG3 DCS RD", "JPG3 DCS WR",
-                   "JPG DCS RD", "JPG DCS WR",
-                   "DCS RD", "DCS WR"]
-    for h in data_fields:
-        bandwidth_metrics_dict[h] = 0
-    for l in bandwidth_metrics:
-        if l["name"] in data_fields:
-            bandwidth_metrics_dict[l["name"]] = l["value"]/(1e9)
-    bandwidth_metrics_dict["PCPU DCS RD"] = bandwidth_metrics_dict["PCPU DCS RD"] + \
-        bandwidth_metrics_dict["PCPU0 DCS RD"] + \
-        bandwidth_metrics_dict["PCPU1 DCS RD"] + \
-        bandwidth_metrics_dict["PCPU2 DCS RD"] + \
-        bandwidth_metrics_dict["PCPU3 DCS RD"]
-    bandwidth_metrics_dict["PCPU DCS WR"] = bandwidth_metrics_dict["PCPU DCS WR"] + \
-        bandwidth_metrics_dict["PCPU0 DCS WR"] + \
-        bandwidth_metrics_dict["PCPU1 DCS WR"] + \
-        bandwidth_metrics_dict["PCPU2 DCS WR"] + \
-        bandwidth_metrics_dict["PCPU3 DCS WR"]
-    bandwidth_metrics_dict["JPG DCS RD"] = bandwidth_metrics_dict["JPG DCS RD"] + \
-        bandwidth_metrics_dict["JPG0 DCS RD"] + \
-        bandwidth_metrics_dict["JPG1 DCS RD"] + \
-        bandwidth_metrics_dict["JPG2 DCS RD"] + \
-        bandwidth_metrics_dict["JPG3 DCS RD"]
-    bandwidth_metrics_dict["JPG DCS WR"] = bandwidth_metrics_dict["JPG DCS WR"] + \
-        bandwidth_metrics_dict["JPG0 DCS WR"] + \
-        bandwidth_metrics_dict["JPG1 DCS WR"] + \
-        bandwidth_metrics_dict["JPG2 DCS WR"] + \
-        bandwidth_metrics_dict["JPG3 DCS WR"]
-    bandwidth_metrics_dict["VENC DCS RD"] = bandwidth_metrics_dict["VENC DCS RD"] + \
-        bandwidth_metrics_dict["VENC0 DCS RD"] + \
-        bandwidth_metrics_dict["VENC1 DCS RD"] + \
-        bandwidth_metrics_dict["VENC2 DCS RD"] + \
-        bandwidth_metrics_dict["VENC3 DCS RD"]
-    bandwidth_metrics_dict["VENC DCS WR"] = bandwidth_metrics_dict["VENC DCS WR"] + \
-        bandwidth_metrics_dict["VENC0 DCS WR"] + \
-        bandwidth_metrics_dict["VENC1 DCS WR"] + \
-        bandwidth_metrics_dict["VENC2 DCS WR"] + \
-        bandwidth_metrics_dict["VENC3 DCS WR"]
-    bandwidth_metrics_dict["MEDIA DCS"] = sum([
-        bandwidth_metrics_dict["ISP DCS RD"], bandwidth_metrics_dict["ISP DCS WR"],
-        bandwidth_metrics_dict["STRM CODEC DCS RD"], bandwidth_metrics_dict["STRM CODEC DCS WR"],
-        bandwidth_metrics_dict["PRORES DCS RD"], bandwidth_metrics_dict["PRORES DCS WR"],
-        bandwidth_metrics_dict["VDEC DCS RD"], bandwidth_metrics_dict["VDEC DCS WR"],
-        bandwidth_metrics_dict["VENC DCS RD"], bandwidth_metrics_dict["VENC DCS WR"],
-        bandwidth_metrics_dict["JPG DCS RD"], bandwidth_metrics_dict["JPG DCS WR"],
-    ])
-    return bandwidth_metrics_dict
-
 
 def parse_cpu_metrics(powermetrics_parse):
     e_core = []
@@ -266,8 +110,8 @@ def parse_cpu_metrics(powermetrics_parse):
                 p_total_idle_ratio += idle_ratio
                 p_core_count += 1
     
-    cpu_metric_dict["E-Cluster_active"] = int((1 - e_total_idle_ratio/e_core_count)*100)
-    cpu_metric_dict["P-Cluster_active"] = int((1 - p_total_idle_ratio/p_core_count)*100)
+    cpu_metric_dict["E-Cluster_active"] = int((1 - e_total_idle_ratio/e_core_count)*100) if e_core_count else 0
+    cpu_metric_dict["P-Cluster_active"] = int((1 - p_total_idle_ratio/p_core_count)*100) if p_core_count else 0
     cpu_metric_dict["e_core"] = e_core
     cpu_metric_dict["p_core"] = p_core
     if "E-Cluster_active" not in cpu_metric_dict:
@@ -332,7 +176,6 @@ def parse_network_metrics(powermetrics_parse):
         "in_Bps": int(network_metrics.get("ibyte_rate",0)),
     }
     return network_metrics_dict
-
 
 class DefaultView():
     def __init__(self,soc_info_dict,args):
@@ -508,9 +351,9 @@ class DefaultView():
         max_gpu_bw = soc_info_dict["gpu_max_bw"]
         max_media_bw = 7.0"""
 
-        self.avg_package_power_list = deque([], maxlen=int(args.avg / args.interval))
-        self.avg_cpu_power_list = deque([], maxlen=int(args.avg / args.interval))
-        self.avg_gpu_power_list = deque([], maxlen=int(args.avg / args.interval))
+        self.avg_package_power_list = deque([], maxlen=max(1, int(args.avg / args.interval)))
+        self.avg_cpu_power_list = deque([], maxlen=max(1, int(args.avg / args.interval)))
+        self.avg_gpu_power_list = deque([], maxlen=max(1, int(args.avg / args.interval)))
 
     def display(self,powermetrics_parse,args):
         if args.color != self.gpu_gauge.color:
@@ -859,101 +702,76 @@ class DefaultView():
             self.ui.display()
 
 def get_avg(inlist):
-    avg = sum(inlist) / len(inlist)
-    return avg
+    if not inlist:
+        return 0
+    return sum(inlist) / len(inlist)
 
-def begin(stdscr):
-    soc_info_dict = get_soc_info()
+
+def begin(stdscr, sampler):
+    soc_info_dict = sampler.soc
     view1 = None
     stdscr.nodelay(True)
-    view = 1
+    view = 2 if args.show_cores else 1
+    sampler.prime()
     try:
-        data = b''
         while True:
-            output = powermetrics_process.stdout.readline()
-            if powermetrics_process.poll() is not None:
-                break
-            data = data + output
-            str_output = output.decode()
-            if str_output.startswith('</plist>'):
-                if view1 is None:
-                    view1 = DefaultView(soc_info_dict=soc_info_dict,args=args)
+            time.sleep(max(0.05, args.interval))
+            powermetrics_parse = sampler.sample()
+            if view1 is None:
+                view1 = DefaultView(soc_info_dict=soc_info_dict, args=args)
+                clear_console()
+            key = stdscr.getch()
+            if key > 0:
+                if key == 27:
+                    print("\nStopping...")
+                    break
+                elif key == curses.KEY_LEFT:
+                    args.color = (args.color - 1) if args.color > 1 else 8
+                elif key == curses.KEY_RIGHT:
+                    args.color = (args.color + 1) if args.color < 8 else 1
+                elif chr(key).lower() == 'q':
+                    print("\nStopping...")
+                    break
+                elif chr(key) == '1':
+                    args.show_cores = False
+                    if view != 1:
+                        view1.construct(soc_info_dict, args)
+                    view = 1
                     clear_console()
-                data = data.replace(b'\x00',b'')
-                powermetrics_parse = plistlib.loads(data)
-                key = stdscr.getch()
-                if key > 0:
-                    if key == 27:
-                        print("\nStopping...")
-                        break
-                    elif key  == curses.KEY_LEFT:
-                        args.color = (args.color - 1) if args.color > 1 else 8
-                    elif key == curses.KEY_RIGHT:
-                        args.color = (args.color + 1) if args.color < 8 else 1 
-                    elif chr(key).lower() == 'q':
-                        print("\nStopping...")
-                        break
-                    elif chr(key) == '1':
-                        args.show_cores = False
-                        if view != 1: 
-                            view1.construct(soc_info_dict,args)
-                        view = 1
-                        clear_console()
-                    elif chr(key) == '2':
-                        args.show_cores = True
-                        if view != 2: 
-                            view1.construct(soc_info_dict,args)
-                        view = 2
-                        clear_console()
-                    elif key == 0x12:
-                        #press ctrl+r to reset max and peak values
-                        view1.__init__(soc_info_dict,args)
-                           
-                if view == 1 or view == 2:
-                    view1.display(powermetrics_parse,args)
-                data = b''
-            if str_output == '':
-                time.sleep(0.1)
-
+                elif chr(key) == '2':
+                    args.show_cores = True
+                    if view != 2:
+                        view1.construct(soc_info_dict, args)
+                    view = 2
+                    clear_console()
+                elif key == 0x12:
+                    # press ctrl+r to reset max and peak values
+                    view1.__init__(soc_info_dict, args)
+            view1.display(powermetrics_parse, args)
     except KeyboardInterrupt:
         print("Stopping...")
 
-    return 
+    return
+
 
 def main():
-    global powermetrics_process
-    print(f"\n{version} - enhanced MAC Performance monitoring CLI tool for Apple Silicon")
-    print("You can update macpm by running `pip install macpm --upgrade`")
+    print(f"\n{version} - rootless MAC performance monitoring CLI tool for Apple Silicon")
+    print("No sudo or password required. Data source: IOReport + IOKit + psutil")
     print("Get help at `https://github.com/visualcjy/macpm`")
-    print("P.S. You are recommended to run macpm with `sudo macpm`\n")
     print("\n[1/3] Loading macpm\n")
-    print("\n[2/3] Starting powermetrics process\n")
-    pause = os.popen("sudo echo").read()
-    command = " ".join([
-        "sudo nice -n",
-        str(10),
-        "powermetrics",
-        "--samplers cpu_power,gpu_power,thermal,network,disk",
-        "-f plist",
-        "-i",
-        str(args.interval * 1000)
-    ])
-    powermetrics_process = subprocess.Popen(command.split(" "), stdin=PIPE, stdout=PIPE)
-
+    print("\n[2/3] Starting IOReport samplers\n")
+    try:
+        sampler = Sampler(args.interval)
+    except Exception as error:
+        raise SystemExit(f"macpm: unable to start samplers: {error}")
     print("\n[3/3] Waiting for first reading...\n")
     print("\033[?25l")
-    curses.wrapper(begin)
-    print("\033[?25h")
+    try:
+        curses.wrapper(begin, sampler)
+    finally:
+        sampler.close()
+        print("\033[?25h")
+
 
 if __name__ == "__main__":
-
     main()
- 
-    try:
-        powermetrics_process.terminate()
-        print("Successfully terminated powermetrics process")
-    except Exception as e:
-        print(e)
-        powermetrics_process.terminate()
-        print("Successfully terminated powermetrics process")
-

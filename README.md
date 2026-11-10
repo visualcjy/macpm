@@ -1,100 +1,187 @@
 # macpm
 
-PyPI - Downloads (https://pypi.org/project/macpm/#files)
-or: pip install macpm
+**Rootless performance monitoring CLI for Apple Silicon.**<br>
+macpm 2.0 reads the same hardware counters as `powermetrics`, but through
+IOReport/IOKit/SMC — no `sudo`, no password, no privileged helper.
 
-enhanced MAC Performance monitoring CLI tool for Apple Silicon
+![macpm](https://raw.githubusercontent.com/visualcjy/macpm/main/images/macpm-v.gif)
 
-![](images/macpm-v.gif)
-![](images/macpm.gif)
-```shell
-pip install macpm
+A Python-based `nvtop`-inspired terminal monitor for Apple Silicon Macs,
+forked from [asitop](https://github.com/tlkh/asitop).
+
+## Highlights
+
+- **No sudo required.** `macpm` runs as a normal user process.
+- CPU E/P core utilisation and frequency, plus an optional per-core view
+- GPU utilisation and frequency
+- CPU / GPU / ANE power, rolling average, peaks and throttle state
+- RAM and swap usage
+- Disk IOPS/throughput and network throughput
+- Optional temperature/fan reader (`macpm-sensors`)
+- Same terminal layout, colours, charts and key bindings as macpm 0.x
+
+## Install
+
+Requirements: **Apple Silicon Mac**, **macOS 12+**, **Python 3.9+**.
+
+```sh
+python3 -m pip install --upgrade macpm
 ```
 
-## What is `macpm`
+Then run:
 
-forked form https://github.com/tlkh/asitop
-1. fixed the problem that "E-CPU Usage" and "P-CPU Usage" always 100%
-2. add "Disk IO" and "Network IO" info
-3. adjust the hard coded max power in CPU/GPU/ANE
-4. change the way to call powermetrics, no temp files in /tmp 
-5. press ESC or q to quit
-6. press LEFT or RIGHT to switch color, press 1 : default view, 2 : show_core view
-7. fix M1 has no "down_ratio" tag problem, fix p-core cpu usage
-   press ctrl + r to reset the max and peak record
-
-A Python-based `nvtop`-inspired command line tool for Apple Silicon (aka M1) Macs.
-
-* Utilization info:
-  * CPU (E-cluster and P-cluster), GPU
-  * Frequency and utilization
-  * ANE utilization (measured by power)
-* Memory info:
-  * RAM and swap, size and usage
-  * (Apple removed memory bandwidth from `powermetrics`)
-* Power info:
-  * CPU power, GPU power (Apple removed package power from `powermetrics`)
-  * Chart for CPU/GPU power
-  * Peak power, rolling average display
-
-`macpm` uses the built-in [`powermetrics`](https://www.unix.com/man-page/osx/1/powermetrics/) utility on macOS, which allows access to a variety of hardware performance counters. Note that it requires `sudo` to run due to `powermetrics` needing root access to run. `macpm` is lightweight and has minimal performance impact.
-
-**`macpm` only works on Apple Silicon Macs on macOS Monterey!**
-
-## Installation and Usage
-
-`macpm` is a Python-based command line tool. You need `pip` to download and install `macpm`. macOS already comes with Python, to install `pip`, you can follow an [online guide](https://phoenixnap.com/kb/install-pip-mac). After you install `macpm` via `pip`, you can use it via the Terminal.
-
-```shell
-# to enter password before start
-# this mode is recommended!
-sudo macpm
-
-# it will prompt password on start
+```sh
 macpm
-
-# advanced options
-macpm [-h] [--interval INTERVAL] [--color COLOR] [--avg AVG]
-optional arguments:
-  -h, --help           show this help message and exit
-  --interval INTERVAL  Display interval and sampling interval for powermetrics (seconds)
-  --color COLOR        Choose display color (0~8)
-  --avg AVG            Interval for averaged values (seconds)
 ```
 
-## How it works
+There is **no `sudo macpm`** in 2.0. Running it with `sudo` still works, but it
+is unnecessary and no longer recommended.
 
-`powermetrics` is used to measure the following:
+Prefer a standalone binary with no Python installation? See
+[Standalone binaries](#standalone-binaries).
 
-* CPU/GPU utilization via active residency
-* CPU/GPU frequency
-* Package/CPU/GPU/ANE energy consumption
-* CPU/GPU/Media Total memory bandwidth via the DCS (DRAM Command Scheduler)
+## Usage
 
-[`psutil`](https://github.com/giampaolo/psutil) is used to measure the following:
+```text
+macpm [--interval INTERVAL] [--color COLOR] [--avg AVG] [--show_cores [BOOL]] [--version]
+```
 
-* memory and swap usage
+| Option | Meaning |
+|---|---|
+| `--interval SECONDS` | Sampling and display interval (default `1`) |
+| `--color 1-8` | Display colour (default `2`) |
+| `--avg SECONDS` | Averaging window for power values (default `30`) |
+| `--show_cores [BOOL]` | Start in the per-core view |
+| `--version` | Print the version |
 
-[`sysctl`](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man3/sysctl.3.html) is used to measure the following:
+Keys:
 
-* CPU name
-* CPU core counts
+```text
+q / ESC     quit
+← / →       change colour
+1 / 2       default view / per-core view
+Ctrl+R      reset peaks
+```
 
-[`system_profiler`](https://ss64.com/osx/system_profiler.html) is used to measure the following:
+## Why no sudo?
 
-* GPU core count
+macpm 0.x called `sudo powermetrics`. In 2.0 the sampler reads the underlying
+counters directly.  The data is not secret; the old `powermetrics` CLI simply
+requires root and Apple's private entitlements.
 
-Some information is guesstimate and hardcoded as there doesn't seem to be a official source for it on the system:
+| Metric | Source |
+|---|---|
+| CPU E/P load and frequency | IOReport `CPU Stats` performance states |
+| Per-core load | IOReport `CPU Core Performance States` |
+| GPU load and frequency | IOReport `GPU Stats` / `GPU Performance States` |
+| CPU / GPU / ANE power | IOReport `Energy Model` |
+| RAM / swap | `psutil` |
+| Disk / network | `psutil` counters |
+| Thermal throttle | `pmset -g therm` |
+| SoC name / core counts | `sysctl` |
+| GPU core count | `ioreg` `gpu-core-count` |
 
-* CPU/GPU TDP
-* CPU/GPU maximum memory bandwidth
-* ANE max power
-* Media engine max bandwidth
+The DVFS frequency tables are parsed from the `pmgr` IORegistry node;
+M1–M3 store Hz there, M4+ store kHz.
 
-## Why
+## Temperatures and fans
 
-Because I didn't find something like this online. Also, just curious about stuff.
+The default TUI intentionally stays identical to macpm 0.x, which has no
+temperature/fan panel.  The standalone SMC reader is available as:
 
-## Disclaimers
+```sh
+macpm-sensors
+macpm-sensors --json
+```
 
-I did this randomly don't blame me if it fried your new MacBook or something.
+It reads `AppleSMC` through the IOKit user client (read-only, no root) and
+reports the raw sensor keys present on the chip, fan RPM/min/max, and
+`PSTR`/`PPBR` power rails.  Fan **control** requires root and is not
+implemented.
+
+## Compatibility
+
+Tested on macOS 27.2 with an M3 Max.  Behaviour depends more on the chip
+generation than on the macOS version:
+
+| Environment | Status |
+|---|---|
+| macOS 12–15, M1–M4 | Works |
+| macOS 26, M1–M4 | Likely works |
+| macOS 26, M5 / M5 Pro / Max | Partial: new CPU tier/channel names (`MCPU`/`SCPU`) and `acc-clusters` DVFS data are not fully handled |
+| macOS 15/26, M1/M2 Ultra | Needs verification: multi-die complex channels may be `ECPU0/1` |
+| macOS 27 | Works on the tested M3 Max; some 27 builds restrict unprivileged `Energy Model` refreshes |
+| Intel Macs | Not supported; the Apple-Silicon IOReport groups are absent |
+
+## Standalone binaries
+
+Standalone unsigned/ad-hoc arm64 binaries (`macpm`, `macpm-sensors`) can be
+built with `packaging/build.sh` and attached to a GitHub release.  They bundle
+Python and all dependencies, so the target Mac needs no Python installation.
+
+On first launch from a browser download, macOS Gatekeeper may ask you to
+right-click → Open, or you can remove the quarantine flag:
+
+```sh
+xattr -d com.apple.quarantine ./macpm ./macpm-sensors ./macpm.command
+```
+
+See [packaging/README.txt](https://github.com/visualcjy/macpm/blob/main/packaging/README.txt) for details.
+
+## Development
+
+```sh
+git clone https://github.com/visualcjy/macpm.git
+cd macpm
+python3 -m venv .venv
+. .venv/bin/activate
+python3 -m pip install -e .
+python3 -m unittest discover -s tests -v
+```
+
+Build source and wheel distributions:
+
+```sh
+python3 -m pip install build twine
+python3 -m build
+python3 -m twine check dist/*
+```
+
+Build standalone arm64 binaries (build machine needs Python + PyInstaller +
+runtime dependencies; the output has no Python dependency):
+
+```sh
+PYTHON=python3 packaging/build.sh
+```
+
+Release steps are documented in [RELEASE.md](https://github.com/visualcjy/macpm/blob/main/RELEASE.md).
+
+## Troubleshooting
+
+- **`macpm: command not found`** — add your Python user-base `bin` directory to
+  `PATH`, or run `python3 -m macpm`.
+- **Power readings freeze on macOS 27** — some builds restrict unprivileged
+  `Energy Model` refreshes.  CPU/GPU usage and frequency still work.  Run
+  `macpm-dump` to inspect the raw values.
+- **M5/Ultra values look wrong** — CPU tier/channel mapping is not complete;
+  see the compatibility table.
+- **`macpm-sensors` shows nothing** — not every SMC key exists on every chip;
+  the reader only reports the keys that are present.
+
+## Changelog
+
+See [CHANGELOG.md](https://github.com/visualcjy/macpm/blob/main/CHANGELOG.md).  The 2.0 release removes the dependency on
+`sudo`, `powermetrics` and temporary files.
+
+## Credits
+
+- [asitop](https://github.com/tlkh/asitop) — original Python TUI this project
+  was forked from
+- [macmon](https://github.com/vladkens/macmon) and
+  [Stats](https://github.com/exelban/stats) — IOReport/SMC reference
+  implementations
+- The IOReport sample-delta and DVFS-table ideas follow those projects
+
+## License
+
+MIT.  See [LICENSE](https://github.com/visualcjy/macpm/blob/main/LICENSE).
