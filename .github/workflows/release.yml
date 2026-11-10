@@ -50,10 +50,16 @@ jobs:
           name: python-package
           path: dist
       - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          # Re-running a release (or a manual workflow_dispatch to verify the
+          # trusted publisher) must not fail on files that are already there.
+          skip-existing: true
 
   github-release:
     name: GitHub release
     needs: [build]
+    # Only a tag push creates/updates the release; a manual run is for PyPI.
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4

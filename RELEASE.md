@@ -46,14 +46,38 @@ python3 -m venv /tmp/macpm-wheel-test
 
 ## 4. Publish to PyPI
 
-Preferred: configure PyPI Trusted Publishing for this repository and the
-`pypi` environment, then run the `Release` GitHub workflow on tag `v2.0`.
+Publishing uses PyPI Trusted Publishing (OIDC) — no API token is stored in
+the repository or in GitHub secrets.
 
-Manual alternative:
+One-time setup:
+
+1. On PyPI, add a pending trusted publisher at
+   <https://pypi.org/manage/account/publishing/>:
+
+   | Field | Value |
+   |---|---|
+   | PyPI Project Name | `macpm` |
+   | Owner | `visualcjy` |
+   | Repository name | `macpm` |
+   | Workflow name | `release.yml` |
+   | Environment name | `pypi` |
+
+2. On GitHub, keep the repository variable
+   `PUBLISH_PYPI=true` (Settings → Secrets and variables → Actions →
+   Variables) and the `pypi` environment.  Without the variable the release
+   workflow only creates the GitHub release.
+
+After that, pushing a `v*` tag builds and uploads to PyPI automatically:
+the `release.yml` workflow runs in the `pypi` environment, and the PyPI job
+skips files that already exist, so re-runs are safe.  A manual
+`workflow_dispatch` on the tag re-runs only the build and PyPI jobs.
+
+Manual alternative (fallback, e.g. when OIDC is unavailable):
 
 ```sh
 # requires a PyPI API token in ~/.pypirc or TWINE_PASSWORD
-python3 -m twine upload dist/macpm-2.0.tar.gz dist/macpm-2.0-py3-none-any.whl
+python3 -m twine upload --non-interactive \
+    dist/macpm-2.0.tar.gz dist/macpm-2.0-py3-none-any.whl
 ```
 
 Then verify:
