@@ -51,12 +51,14 @@ the repository or in GitHub secrets.
 
 One-time setup:
 
-1. On PyPI, add a pending trusted publisher at
-   <https://pypi.org/manage/account/publishing/>:
+1. On PyPI, add a trusted publisher.  Because `macpm` already exists on
+   PyPI, use the project settings page —
+   <https://pypi.org/manage/project/macpm/settings/publishing/> —
+   not the account-level "pending publisher" page (that one is only for
+   projects that do not exist yet).
 
    | Field | Value |
    |---|---|
-   | PyPI Project Name | `macpm` |
    | Owner | `visualcjy` |
    | Repository name | `macpm` |
    | Workflow name | `release.yml` |
