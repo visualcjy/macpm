@@ -126,3 +126,31 @@ Attach it to the GitHub release.  The binaries are ad-hoc signed, not
 notarized; see `packaging/README.txt` for the Gatekeeper note.  To notarize,
 pass `CODESIGN_ID` to the build script and submit/staple the archive with
 `notarytool`.
+
+## 7. Update the Homebrew tap
+
+`brew install visualcjy/macpm/macpm` installs the standalone tarball from the
+tap at <https://github.com/visualcjy/homebrew-macpm>.  After attaching a new
+`dist/macpm-X.Y-macos-arm64.tar.gz` to the release, bump the formula:
+
+```sh
+shasum -a 256 dist/macpm-X.Y-macos-arm64.tar.gz
+```
+
+then in the tap repository, `Formula/macpm.rb`:
+
+```ruby
+url "https://github.com/visualcjy/macpm/releases/download/vX.Y/macpm-X.Y-macos-arm64.tar.gz"
+sha256 "<the hash above>"
+```
+
+Verify before pushing:
+
+```sh
+brew audit --strict visualcjy/macpm/macpm
+brew style visualcjy/macpm/macpm
+brew reinstall visualcjy/macpm/macpm
+brew test macpm
+```
+
+The formula only needs a version/sha bump; `version` is derived from the URL.
