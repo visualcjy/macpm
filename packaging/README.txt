@@ -1,4 +1,4 @@
-macpm 2.0 - rootless performance monitor for Apple Silicon
+macpm 2.1 - rootless performance monitor for Apple Silicon
 ==========================================================
 
 No Python installation is required.  The binaries bundle their own runtime.
@@ -26,8 +26,9 @@ If ~/.local/bin is not on PATH, follow the printed instructions.
 
 Temperatures and fans
 ---------------------
-    macpm-sensors
-    macpm-sensors --json
+The default view shows a "Temps & Fans" box with the hottest CPU and GPU
+sensors and the current fan speeds.  They are read from the SMC, read-only,
+without root.
 
 Options / keys
 --------------
@@ -39,7 +40,10 @@ Options / keys
 
     q / ESC   quit
     <- / ->   change colour
-    1 / 2     default / per-core view
+    1 / 2 / 3 default / per-core / process view
+    s         cycle process sort column
+    Up / Down scroll process list
+    Space     pause / resume process list
     Ctrl+R    reset peaks
 
 Gatekeeper
@@ -49,7 +53,6 @@ downloaded copy, either right-click "macpm.command" and choose Open, or run:
 
     xattr -d com.apple.quarantine ./macpm
     xattr -d com.apple.quarantine ./macpm.command
-    xattr -d com.apple.quarantine ./macpm-sensors
 
 Only do this for a build you trust.
 

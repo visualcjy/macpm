@@ -96,20 +96,29 @@ def _fourcc(key: str) -> int:
     return int.from_bytes(key.encode("ascii"), "big")
 
 
-# Temperature key candidates by chip family.  SMC key names are not stable
-# across generations; only the keys that exist are reported.
-_COMMON_TEMPS = ["TC0P", "TC0D", "TC0E", "TC0F", "TC0H", "TC0S", "TB1T", "TB2T"]
-_CHIP_TEMPS = {
+# CPU and GPU temperature keys by chip family.  SMC key names are not stable
+# across generations, so the groups follow the tables used by exelban/stats
+# instead of scanning prefixes (some sensors report meaningless values).
+_CPU_TEMPS = {
     "M1": ["Tp09", "Tp0T", "Tp01", "Tp05", "Tp0D", "Tp0H", "Tp0L", "Tp0P", "Tp0X", "Tp0b"],
     "M2": ["Tp1h", "Tp1t", "Tp1p", "Tp1l", "Tp01", "Tp05", "Tp09", "Tp0D", "Tp0X", "Tp0b", "Tp0f", "Tp0j"],
     "M3": ["Te05", "Te0L", "Te0P", "Te0S", "Tf04", "Tf09", "Tf0A", "Tf0B", "Tf0D", "Tf0E", "Tf44", "Tf49", "Tf4A", "Tf4B", "Tf4D", "Tf4E"],
-    "M4": ["Te05", "Te09", "Te0H", "Te0S", "Tp01", "Tp05", "Tp09", "Tp0D", "Tp0V", "Tp0Y", "Tp0b", "Tp0e"],
+    "M4": ["Te05", "Te0S", "Te09", "Te0H", "Tp01", "Tp05", "Tp09", "Tp0D", "Tp0V", "Tp0Y", "Tp0b", "Tp0e"],
     "M5": ["Tp00", "Tp04", "Tp08", "Tp0C", "Tp0G", "Tp0K", "Tp0O", "Tp0R", "Tp0U", "Tp0X", "Tp0a", "Tp0d", "Tp0g", "Tp0j", "Tp0m", "Tp0p", "Tp0u", "Tp0y"],
+    "M6": ["Tp0j", "Tp0g", "Tp09", "Tp07", "Tp0m", "Tp0L", "Tp0I", "Tp0d", "Tp0E", "Tp0G", "Tp0b", "Tp05", "Te07", "Te08", "Te09", "Te0c", "Te0h", "Te0i"],
+}
+_GPU_TEMPS = {
+    "M1": ["Tg05", "Tg0D", "Tg0L", "Tg0T"],
+    "M2": ["Tg0f", "Tg0j"],
+    "M3": ["Tf14", "Tf18", "Tf19", "Tf1A", "Tf24", "Tf28", "Tf29", "Tf2A"],
+    "M4": ["Tg0G", "Tg0H", "Tg1U", "Tg1k", "Tg0K", "Tg0L", "Tg0d", "Tg0e", "Tg0j", "Tg0k"],
+    "M5": ["Tg0U", "Tg0X", "Tg0d", "Tg0g", "Tg0j", "Tg1Y", "Tg1c", "Tg1g"],
+    "M6": ["Tg1e", "Tg0d", "Tg0c", "Tg0b", "Tg1c", "Tg1d", "Tg07", "Tg1f", "Tg09", "Tg0a", "Tg1g", "Tg1h"],
 }
 
 
 def _chip_family(chip: str) -> str:
-    for family in ("M1", "M2", "M3", "M4", "M5"):
+    for family in ("M6", "M5", "M4", "M3", "M2", "M1"):
         if family in chip:
             return family
     return "M3"
@@ -270,15 +279,26 @@ class SMC:
             )
         return fans
 
-    def get_temperatures(self, chip: str) -> dict[str, float]:
-        family = _chip_family(chip)
-        keys = list(dict.fromkeys(_CHIP_TEMPS.get(family, []) + _COMMON_TEMPS))
-        values = {}
-        for key in keys:
+    def _max_temperature(self, keys: list[str]) -> Optional[float]:
+        best = None
+        for key in dict.fromkeys(keys):
             value = self.get_value(key)
             if isinstance(value, (int, float)) and 0 < value < 130:
-                values[key] = round(float(value), 2)
-        return values
+                best = value if best is None else max(best, value)
+        return None if best is None else round(float(best), 1)
+
+    def get_thermal_summary(self, chip: str) -> dict[str, Optional[float]]:
+        """Hottest CPU and GPU sensor in degrees Celsius.
+
+        A group is ``None`` when none of its keys exist on this chip.  The
+        battery/system sensors are intentionally ignored: the panel only
+        reports the SoC.
+        """
+        family = _chip_family(chip)
+        return {
+            "cpu_c": self._max_temperature(_CPU_TEMPS.get(family, [])),
+            "gpu_c": self._max_temperature(_GPU_TEMPS.get(family, [])),
+        }
 
     def get_power(self) -> dict[str, Optional[float]]:
         result = {}

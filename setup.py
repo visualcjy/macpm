@@ -7,7 +7,7 @@ README = (ROOT / "README.md").read_text(encoding="utf-8")
 
 setup(
     name="macpm",
-    version="2.0",
+    version="2.1",
     author="Jinyu Chen",
     author_email="visualcjy@mail.com",
     url="https://github.com/visualcjy/macpm",
@@ -32,7 +32,6 @@ setup(
     entry_points={
         "console_scripts": [
             "macpm = macpm.macpm:main",
-            "macpm-sensors = macpm.sensors:main",
             "macpm-dump = macpm.dump:main",
         ]
     },

@@ -1,7 +1,7 @@
 # macpm
 
 **Rootless performance monitoring CLI for Apple Silicon.**<br>
-macpm 2.0 reads the same hardware counters as `powermetrics`, but through
+macpm 2.1 reads the same hardware counters as `powermetrics`, but through
 IOReport/IOKit/SMC — no `sudo`, no password, no privileged helper.
 
 A Python-based `nvtop`-inspired terminal monitor for Apple Silicon Macs,
@@ -9,8 +9,8 @@ forked from [asitop](https://github.com/tlkh/asitop).
 
 ## Demo
 
-Default view — CPU/GPU/ANE utilisation and power, memory, disk I/O and
-network, updating once per second:
+Default view — CPU/GPU/ANE utilisation and power, memory, temperatures/fans,
+disk I/O and network, updating once per second:
 
 ![macpm default view](https://raw.githubusercontent.com/visualcjy/macpm/main/images/macpm_v.gif)
 
@@ -29,9 +29,10 @@ Per-core view (`--show_cores`, or press `2` while running):
 - GPU utilisation and frequency
 - CPU / GPU / ANE power, rolling average, peaks and throttle state
 - RAM and swap usage
+- CPU/GPU temperature and fan RPM panel (SMC, read-only, no root)
 - Disk IOPS/throughput and network throughput
-- Optional temperature/fan reader (`macpm-sensors`)
-- Same terminal layout, colours, charts and key bindings as macpm 0.x
+- Process view with per-process CPU, memory and GPU usage, sortable with `s`
+- Familiar terminal layout, colours, charts and key bindings from macpm 0.x
 
 ## Install
 
@@ -47,7 +48,7 @@ Then run:
 macpm
 ```
 
-There is **no `sudo macpm`** in 2.0. Running it with `sudo` still works, but it
+There is **no `sudo macpm`** since 2.0. Running it with `sudo` still works, but it
 is unnecessary and no longer recommended.
 
 Prefer a standalone binary with no Python installation? See
@@ -72,7 +73,10 @@ Keys:
 ```text
 q / ESC     quit
 ← / →       change colour
-1 / 2       default view / per-core view
+1 / 2 / 3   default / per-core / process view
+s           cycle the process sort column (process view)
+↑ / ↓       scroll the process list (process view)
+Space       pause / resume the process list (process view)
 Ctrl+R      reset peaks
 ```
 
@@ -102,6 +106,9 @@ requires root and Apple's private entitlements.
 | CPU / GPU / ANE power | IOReport `Energy Model` |
 | RAM / swap | `psutil` |
 | Disk / network | `psutil` counters |
+| Per-process CPU / memory | `psutil`, plus `/bin/ps` for other users |
+| Per-process GPU | `IOAccelerator` user clients in the IORegistry |
+| CPU/GPU temperature, fan RPM | `AppleSMC` via the IOKit user client |
 | Thermal throttle | `pmset -g therm` |
 | SoC name / core counts | `sysctl` |
 | GPU core count | `ioreg` `gpu-core-count` |
@@ -111,18 +118,41 @@ M1–M3 store Hz there, M4+ store kHz.
 
 ## Temperatures and fans
 
-The default TUI intentionally stays identical to macpm 0.x, which has no
-temperature/fan panel.  The standalone SMC reader is available as:
+The default view has a **Temps & Fans** box next to the memory gauge.  It shows
+the hottest CPU and GPU sensor in °C and the current RPM of every fan, for
+example:
 
-```sh
-macpm-sensors
-macpm-sensors --json
+```text
+┌ Temps & Fans ──────────────────────────┐
+│ CPU 52.4°C   GPU 43.1°C                │
+│ Fan 1 2318 rpm  Fan 2 2502 rpm         │
+└────────────────────────────────────────┘
 ```
 
-It reads `AppleSMC` through the IOKit user client (read-only, no root) and
-reports the raw sensor keys present on the chip, fan RPM/min/max, and
-`PSTR`/`PPBR` power rails.  Fan **control** requires root and is not
-implemented.
+The values come from `AppleSMC` through the IOKit user client (read-only, no
+root).  SMC key names differ between chip generations, so the CPU/GPU sensor
+groups are selected per chip family and a missing key is simply shown as `--`.
+Fan **control** requires root and is not implemented.
+
+## Process view
+
+Press `3` for a macmon-style two-box layout.  The top box is titled with the
+SoC and core counts (as in views 1/2) and keeps the top-style CPU (E/P
+percentages and frequencies), GPU (%, MHz), RAM/swap and
+wired/active/inactive/free memory summary.  The second box is the
+process table with `PID`, `NAME`, `USER`, `CPU%`, `MEM` and `GPU%`; there is no
+power column.  The list is sorted by CPU usage by default; press `s` to cycle
+through CPU → MEM → GPU → PID → NAME → USER, and `↑` / `↓` to scroll.  The
+header shows the current sort column and direction.  Press `Space` to pause the
+list while you scroll through it; the footer changes to `Space resume` and the
+summary keeps updating.  The process table refreshes every 2 seconds (or
+`--interval`, if larger) to keep macpm's own CPU usage low; the summary above
+it refreshes every interval.  macpm's own process is listed as `macpm`.
+
+Per-process CPU and memory come from `psutil`, with `/bin/ps` for processes
+owned by other users (so system processes such as WindowServer appear too).
+GPU usage is the GPU time of the process' `IOAccelerator` user clients;
+processes without a readable GPU client show `0.0`.
 
 ## Compatibility
 
@@ -140,15 +170,15 @@ generation than on the macOS version:
 
 ## Standalone binaries
 
-Standalone unsigned/ad-hoc arm64 binaries (`macpm`, `macpm-sensors`) can be
-built with `packaging/build.sh` and attached to a GitHub release.  They bundle
-Python and all dependencies, so the target Mac needs no Python installation.
+Standalone unsigned/ad-hoc arm64 binary (`macpm`) can be built with
+`packaging/build.sh` and attached to a GitHub release.  It bundles Python and
+all dependencies, so the target Mac needs no Python installation.
 
 On first launch from a browser download, macOS Gatekeeper may ask you to
 right-click → Open, or you can remove the quarantine flag:
 
 ```sh
-xattr -d com.apple.quarantine ./macpm ./macpm-sensors ./macpm.command
+xattr -d com.apple.quarantine ./macpm ./macpm.command
 ```
 
 See [packaging/README.txt](https://github.com/visualcjy/macpm/blob/main/packaging/README.txt) for details.
@@ -185,13 +215,16 @@ Release steps are documented in [RELEASE.md](https://github.com/visualcjy/macpm/
 
 - **`macpm: command not found`** — add your Python user-base `bin` directory to
   `PATH`, or run `python3 -m macpm`.
-- **Power readings freeze on macOS 27** — some builds restrict unprivileged
-  `Energy Model` refreshes.  CPU/GPU usage and frequency still work.  Run
-  `macpm-dump` to inspect the raw values.
+- **Power readings freeze or show `n/a` on macOS 27** — some builds restrict
+  unprivileged `Energy Model` refreshes.  CPU/GPU usage and frequency still
+  work; a counter that never reports is shown as `n/a` instead of `0.00W`.
+  Run `macpm-dump` to inspect the raw values.
 - **M5/Ultra values look wrong** — CPU tier/channel mapping is not complete;
   see the compatibility table.
-- **`macpm-sensors` shows nothing** — not every SMC key exists on every chip;
-  the reader only reports the keys that are present.
+- **The Temps & Fans box says `SMC unavailable`** — the AppleSMC user client
+  could not be opened on this macOS build; the rest of macpm still works.
+- **A temperature shows `--`** — not every SMC key exists on every chip; the
+  reader only reports the keys that are present.
 
 ## Changelog
 

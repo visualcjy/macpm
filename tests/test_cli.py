@@ -25,7 +25,7 @@ class CliTests(unittest.TestCase):
     def test_version(self):
         result = self.run_module("--version")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("macpm v2.0", result.stdout)
+        self.assertIn("macpm v2.1", result.stdout)
 
     def test_help(self):
         result = self.run_module("--help")

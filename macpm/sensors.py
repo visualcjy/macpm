@@ -1,56 +1,128 @@
-"""Print SMC temperatures, fan speeds and a couple of power rails.
+"""CPU/GPU temperatures and fan speeds for the macpm TUI.
 
-This is a diagnostic helper; the default macpm TUI is intentionally kept
-identical to macpm and does not show these panels.
+Reads the AppleSMC through the read-only IOKit user client (no root).  The
+reader is deliberately small and fault tolerant: if the SMC cannot be opened
+the TUI keeps running and the panel says so.
 """
 
-import argparse
-import json
+from __future__ import annotations
+
+import time
+from typing import Optional
 
 from .smc import SMC
-from .soc import get_soc_info
 
 
-def collect() -> dict:
-    soc = get_soc_info()
-    with SMC() as smc:
-        return {
-            "chip": soc["name"],
-            "temperature_c": smc.get_temperatures(soc["name"]),
-            "fans": smc.get_fans(),
-            "power_w": smc.get_power(),
-        }
+def _format_temperature(value: Optional[float]) -> str:
+    return "--" if value is None else f"{value:.1f}\N{DEGREE SIGN}C"
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(prog="macpm-sensors")
-    parser.add_argument("--json", action="store_true", help="print JSON")
-    args = parser.parse_args()
+def _format_rpm_value(value) -> str:
+    if not isinstance(value, (int, float)):
+        return "--"
+    return str(int(round(value)))
 
-    try:
-        data = collect()
-    except Exception as error:
-        raise SystemExit(f"macpm-sensors: {error}")
 
-    if args.json:
-        print(json.dumps(data, indent=2, ensure_ascii=False))
-        return
+def _format_rpm(value) -> str:
+    return f"{_format_rpm_value(value)} rpm"
 
-    print(f"chip: {data['chip']}")
-    print("temperatures:")
-    for key, value in data["temperature_c"].items():
-        print(f"  {key}: {value:.2f} C")
-    print("fans:")
-    for fan in data["fans"]:
-        print(
-            f"  {fan['name']}: {fan['rpm']} rpm "
-            f"(min {fan['min_rpm']}, max {fan['max_rpm']}, mode {fan['mode']})"
+
+def _peak(peak: Optional[float], value: Optional[float]) -> Optional[float]:
+    if value is None:
+        return peak
+    return value if peak is None else max(peak, value)
+
+
+class SensorReader:
+    """Cached SMC readings for the temperature/fan panel.
+
+    ``read()`` is cheap to call every frame: it only talks to the SMC every
+    ``refresh_interval`` seconds and keeps the previous values in between.
+    """
+
+    def __init__(self, chip: str, refresh_interval: float = 2.0):
+        self.chip = chip
+        self.refresh_interval = max(0.5, float(refresh_interval))
+        self.cpu_c: Optional[float] = None
+        self.gpu_c: Optional[float] = None
+        self.cpu_peak: Optional[float] = None
+        self.gpu_peak: Optional[float] = None
+        self.fans: list[dict] = []
+        self.error: Optional[str] = None
+        self.ready = False
+        self._smc: Optional[SMC] = None
+        self._next_read = 0.0
+
+    def close(self) -> None:
+        if self._smc is not None:
+            self._smc.close()
+            self._smc = None
+
+    def read(self) -> None:
+        """Refresh the cached readings when the refresh interval has elapsed."""
+        now = time.monotonic()
+        if now < self._next_read:
+            return
+        self._next_read = now + self.refresh_interval
+
+        if self._smc is None:
+            try:
+                self._smc = SMC()
+            except Exception as error:  # AppleSMC missing or restricted
+                self.error = str(error)
+                return
+        try:
+            summary = self._smc.get_thermal_summary(self.chip)
+            fans = self._smc.get_fans()
+        except Exception as error:
+            self.error = str(error)
+            self.close()
+            return
+
+        self.error = None
+        self.cpu_c = summary["cpu_c"]
+        self.gpu_c = summary["gpu_c"]
+        self.cpu_peak = _peak(self.cpu_peak, self.cpu_c)
+        self.gpu_peak = _peak(self.gpu_peak, self.gpu_c)
+        self.fans = fans
+        self.ready = True
+
+    def reset_peaks(self) -> None:
+        self.cpu_peak = self.cpu_c
+        self.gpu_peak = self.gpu_c
+
+    def lines(self) -> list[str]:
+        """Two short lines that fit the panel in either layout."""
+        if self.error is not None:
+            return ["SMC unavailable", self.error]
+        if not self.ready:
+            return ["reading..."]
+
+        text = (
+            f"CPU {_format_temperature(self.cpu_c)}   "
+            f"GPU {_format_temperature(self.gpu_c)}"
         )
-    if data["power_w"]:
-        print("power:")
-        for key, value in data["power_w"].items():
-            print(f"  {key}: {value:.2f} W")
+        if self.fans:
+            fan_text = "  ".join(
+                f"Fan {fan['id'] + 1} {_format_rpm(fan['rpm'])}" for fan in self.fans
+            )
+        else:
+            fan_text = "Fan: none"
+        return [text, fan_text]
 
-
-if __name__ == "__main__":
-    main()
+    def details(self) -> list[str]:
+        """Extra readings for tall panels; the caller shows what fits."""
+        if self.error is not None or not self.ready:
+            return []
+        peak = (
+            f"CPU peak {_format_temperature(self.cpu_peak)}   "
+            f"GPU peak {_format_temperature(self.gpu_peak)}"
+        )
+        details = [peak]
+        if self.fans:
+            max_rpm = "  ".join(
+                f"Fan {fan['id'] + 1} max {_format_rpm_value(fan.get('max_rpm'))}"
+                for fan in self.fans
+            )
+            details.append(f"{max_rpm} rpm")
+        return details

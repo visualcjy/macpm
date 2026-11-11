@@ -81,6 +81,33 @@ def _energy_to_joules(value: int, unit: str) -> float:
     return max(0.0, float(value)) * _ENERGY_TO_J.get(unit.strip().lower(), 1e-3)
 
 
+_ENERGY_GRACE_SAMPLES = 3
+
+
+def _energy_available(seen: bool, samples: int) -> bool:
+    """Whether a component's Energy Model counter is reporting anything.
+
+    A counter that has never produced a non-zero delta after a few frames is
+    treated as unreadable (macOS 27 can expose it but keep it at zero without
+    root), so the UI can show ``n/a`` instead of a misleading 0 W.
+    """
+    return seen or samples <= _ENERGY_GRACE_SAMPLES
+
+
+def _sane_energy(joules: float, elapsed: float, max_power: float) -> float:
+    """Drop an energy delta that implies an impossible average power.
+
+    macOS sometimes coalesces Energy Model updates, and the counters can jump
+    after a sleep/wake.  Dividing such a delta by a single interval produces
+    thousands of watts; those samples used to stick in the peak tracker.
+    """
+    if joules <= 0:
+        return 0.0
+    if joules / max(elapsed, 1e-3) > max_power:
+        return 0.0
+    return joules
+
+
 class Sampler:
     def __init__(self, interval: float):
         self.interval = max(0.1, float(interval))
@@ -105,6 +132,20 @@ class Sampler:
             )
             if subscription is not None
         ]
+
+        # A component cannot physically exceed these averages; anything above
+        # is a coalesced counter update rather than real power.
+        self._power_limits = {
+            "cpu": max(4.0 * self.soc["cpu_max_power"], 200.0),
+            "gpu": max(4.0 * self.soc["gpu_max_power"], 200.0),
+            "ane": 100.0,
+        }
+
+        # Some macOS builds expose the Energy Model counters but never update
+        # them without root.  Track whether a component has ever produced a
+        # usable delta so the UI can say n/a instead of a misleading 0 W.
+        self._energy_seen = {"cpu": False, "gpu": False}
+        self._sample_count = 0
 
         self.prev_time: Optional[float] = None
         self.prev_disk = None
@@ -168,6 +209,16 @@ class Sampler:
         gpu_joules = self._energy_sum(energy, lambda name: name.endswith("GPU Energy"))
         ane_joules = self._energy_sum(energy, lambda name: name.startswith("ANE"))
 
+        self._sample_count += 1
+        if cpu_joules > 0.0:
+            self._energy_seen["cpu"] = True
+        if gpu_joules > 0.0:
+            self._energy_seen["gpu"] = True
+
+        cpu_joules = _sane_energy(cpu_joules, elapsed, self._power_limits["cpu"])
+        gpu_joules = _sane_energy(gpu_joules, elapsed, self._power_limits["gpu"])
+        ane_joules = _sane_energy(ane_joules, elapsed, self._power_limits["ane"])
+
         # The display divides energy by --interval; normalize by the real
         # elapsed time so the watts stay correct if a frame was delayed.
         energy_scale = self.interval / max(elapsed, 1e-3)
@@ -187,6 +238,12 @@ class Sampler:
                 "cpu_energy": cpu_mj,
                 "gpu_energy": gpu_mj,
                 "combined_power": total_mj,
+                "cpu_energy_available": _energy_available(
+                    self._energy_seen["cpu"], self._sample_count
+                ),
+                "gpu_energy_available": _energy_available(
+                    self._energy_seen["gpu"], self._sample_count
+                ),
             },
             "gpu": {
                 "freq_hz": int(gpu_freq),
