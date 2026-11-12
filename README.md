@@ -1,7 +1,7 @@
 # macpm
 
 **Rootless performance monitoring CLI for Apple Silicon.**<br>
-macpm 2.1 reads the same hardware counters as `powermetrics`, but through
+macpm 2.2 reads the same hardware counters as `powermetrics`, but through
 IOReport/IOKit/SMC — no `sudo`, no password, no privileged helper.
 
 A Python-based `nvtop`-inspired terminal monitor for Apple Silicon Macs,
@@ -22,6 +22,14 @@ Per-core view (`--show_cores`, or press `2` while running):
 
 ![macpm per-core view](https://raw.githubusercontent.com/visualcjy/macpm/main/images/v2.png)
 
+Process view (press `3` while running):
+
+![macpm process view](https://raw.githubusercontent.com/visualcjy/macpm/main/images/v3.png)
+
+Network view (press `4` while running):
+
+![macpm network view](https://raw.githubusercontent.com/visualcjy/macpm/main/images/v4.png)
+
 ## Highlights
 
 - **No sudo required.** `macpm` runs as a normal user process.
@@ -29,9 +37,13 @@ Per-core view (`--show_cores`, or press `2` while running):
 - GPU utilisation and frequency
 - CPU / GPU / ANE power, rolling average, peaks and throttle state
 - RAM and swap usage
-- CPU/GPU temperature and fan RPM panel (SMC, read-only, no root)
+- CPU/GPU temperature, peak and fan-load panel (SMC, read-only, no root)
 - Disk IOPS/throughput and network throughput
-- Process view with per-process CPU, memory and GPU usage, sortable with `s`
+- Process view (`3`) with per-process CPU, memory and GPU usage, sortable with `s`
+- Network view (`4`) with TCP state counts, listening ports, per-process traffic
+  and the local/public IP, gateway and city
+- Key-hint footer in every view; the default view also fills the terminal and
+  shows the network identity in the processor box when there is room
 - Familiar terminal layout, colours, charts and key bindings from macpm 0.x
 
 ## Install
@@ -57,7 +69,7 @@ Prefer a standalone binary with no Python installation? See
 ## Usage
 
 ```text
-macpm [--interval INTERVAL] [--color COLOR] [--avg AVG] [--show_cores [BOOL]] [--version]
+macpm [--interval INTERVAL] [--color COLOR] [--avg AVG] [--show_cores [BOOL]] [--no-public-ip] [--version]
 ```
 
 | Option | Meaning |
@@ -66,18 +78,20 @@ macpm [--interval INTERVAL] [--color COLOR] [--avg AVG] [--show_cores [BOOL]] [-
 | `--color 1-8` | Display colour (default `2`) |
 | `--avg SECONDS` | Averaging window for power values (default `30`) |
 | `--show_cores [BOOL]` | Start in the per-core view |
+| `--no-public-ip` | Do not look up the public IP and location |
 | `--version` | Print the version |
 
-Keys:
+The default view also has a footer with the key hints.  Keys:
 
 ```text
-q / ESC     quit
-← / →       change colour
-1 / 2 / 3   default / per-core / process view
-s           cycle the process sort column (process view)
-↑ / ↓       scroll the process list (process view)
-Space       pause / resume the process list (process view)
-Ctrl+R      reset peaks
+q / ESC         quit
+← / →           change colour
+1 / 2 / 3 / 4   default / per-core / process / network view
+s               cycle the sort column (process / network view)
+↑ / ↓           scroll the list or the focused network pane
+Space           pause / resume the list (process / network view)
+Tab             switch the focused network pane
+Ctrl+R          reset peaks
 ```
 
 ## Colour themes
@@ -105,7 +119,10 @@ requires root and Apple's private entitlements.
 | GPU load and frequency | IOReport `GPU Stats` / `GPU Performance States` |
 | CPU / GPU / ANE power | IOReport `Energy Model` |
 | RAM / swap | `psutil` |
-| Disk / network | `psutil` counters |
+| Disk / network throughput | `psutil` counters |
+| Sockets, listeners, per-process traffic | `nettop` |
+| Local IP / prefix / gateway | `psutil`, `route -n get default` |
+| Public IP / city | `ipinfo.io` (fallback `ipwho.is`) |
 | Per-process CPU / memory | `psutil`, plus `/bin/ps` for other users |
 | Per-process GPU | `IOAccelerator` user clients in the IORegistry |
 | CPU/GPU temperature, fan RPM | `AppleSMC` via the IOKit user client |
@@ -119,14 +136,19 @@ M1–M3 store Hz there, M4+ store kHz.
 ## Temperatures and fans
 
 The default view has a **Temps & Fans** box next to the memory gauge.  It shows
-the hottest CPU and GPU sensor in °C and the current RPM of every fan, for
-example:
+the hottest CPU and GPU sensor with their peaks since the last reset (CPU on
+one row, GPU on the next), the current RPM of every fan, and a fan-load bar
+for each fan (current speed as a
+percentage of its maximum RPM, without a numeric percentage so the bars can
+use the full panel width):
 
 ```text
-┌ Temps & Fans ──────────────────────────┐
-│ CPU 52.4°C   GPU 43.1°C                │
-│ Fan 1 2318 rpm  Fan 2 2502 rpm         │
-└────────────────────────────────────────┘
+┌ Temps & Fans ────────────────────────────────┐
+│ CPU 52.4°C   peak 61.5°C                     │
+│ GPU 43.1°C   peak 50.0°C                     │
+│ Fan 1 2318 rpm  Fan 2 2502 rpm               │
+│ F1 ▉▉▉▉▉▉▉▉▉▉▉▉  F2 ▉▉▉▉▉▉▉▉▉▉▉▉▉            │
+└──────────────────────────────────────────────┘
 ```
 
 The values come from `AppleSMC` through the IOKit user client (read-only, no
@@ -136,7 +158,7 @@ Fan **control** requires root and is not implemented.
 
 ## Process view
 
-Press `3` for a macmon-style two-box layout.  The top box is titled with the
+Press `3` for a two-box layout.  The top box is titled with the
 SoC and core counts (as in views 1/2) and keeps the top-style CPU (E/P
 percentages and frequencies), GPU (%, MHz), RAM/swap and
 wired/active/inactive/free memory summary.  The second box is the
@@ -153,6 +175,63 @@ Per-process CPU and memory come from `psutil`, with `/bin/ps` for processes
 owned by other users (so system processes such as WindowServer appear too).
 GPU usage is the GPU time of the process' `IOAccelerator` user clients;
 processes without a readable GPU client show `0.0`.
+
+## Network view
+
+Press `4` for a network overview built from `nettop`.  The summary box shows
+the TCP socket count per state (`ESTABLISHED`, `LISTEN`, `CLOSE_WAIT`,
+`TIME_WAIT`), the UDP socket count and the current interface throughput.  Below
+it the traffic table lists the busiest processes with their socket count and
+per-process download/upload rate, and the listening table lists every TCP
+listening socket with its bind address, PID and process.  The traffic table is
+sorted by download rate (`↓/s`) by default.  `Tab` moves the focus between the
+two tables, `s` cycles the sort column of the focused table (download, upload,
+connections, PID, name), `↑` / `↓` scroll it and `Space` pauses sampling.  The
+two tables are shown side by side on terminals at least 110 columns wide and
+stacked otherwise; the listening table is hidden when the terminal is narrower
+than 60 columns or too short for two panes.
+
+Per-process rates are the difference between the cumulative byte counters that
+`nettop` reports; the first sample after entering the view is the baseline.  The
+traffic table refreshes every 2 seconds from a per-process snapshot, the
+socket/listening data every 5 seconds from a full snapshot.  Both only run
+while the view is open.
+
+The network view's summary box has a line with the active IPv4 interface and
+prefix, the default gateway, and the public IP with its city.  View 1 shows the
+same line in a spare row of the Processor box when there is one; the per-core
+view leaves that row empty.  For example:
+
+```text
+┌ Network ─────────────────────────────────────────────────────────────────────┐
+│ en0 192.168.1.23/24  ·  gw 192.168.1.1  ·  203.0.113.45 Nanning, CN Unicom  │
+│ TCP  115  EST   61  LISTEN   27  CLOSE_WAIT   25  TIME_WAIT    1  UDP   70   │
+│ ↓    11K/s   ↑   4.0K/s   sockets  185   processes   39                      │
+└──────────────────────────────────────────────────────────────────────────────┘
+```
+
+The local values come from `psutil` and `route -n get default` and refresh
+every 30 seconds while the default or network view is open.  The public values
+come from a background HTTPS request to `ipinfo.io`, falling back to
+`ipwho.is`; for a Chinese address the carrier abbreviation (Telecom, Unicom,
+Mobile) is appended after the country code, e.g. `Shanghai, CN Telecom`.  A successful answer is cached
+for 10 minutes and a failed one is retried after a minute.  The lookup starts when a view that shows the line is
+first drawn — the default view at startup, or the network view — and it
+necessarily reveals your public IP to the service; pass `--no-public-ip` to
+disable it.  On a narrow terminal the line is clipped with an ellipsis.  This
+lookup is the only network request macpm makes.
+
+`nettop` runs without root and, unlike `lsof -i`, sees sockets owned by other
+users, so root daemons such as `launchd` and `mDNSResponder` appear in the
+listening table.  Three limitations follow from the data source:
+
+- `nettop` does not report sockets without an owning process (typically
+  `TIME_WAIT`), so the total is lower than a raw `netstat -an` count;
+  `ESTABLISHED`, `LISTEN` and `CLOSE_WAIT` match.
+- Byte counters include loopback traffic, so the sum of per-process rates can
+  be higher than the interface total in the summary.
+- Process names are truncated to about 15 characters, the same `comm` limit
+  shown in the process view.
 
 ## Compatibility
 
@@ -225,6 +304,11 @@ Release steps are documented in [RELEASE.md](https://github.com/visualcjy/macpm/
   could not be opened on this macOS build; the rest of macpm still works.
 - **A temperature shows `--`** — not every SMC key exists on every chip; the
   reader only reports the keys that are present.
+- **The network view says `nettop unavailable`** — `/usr/bin/nettop` is
+  missing or could not run.  The other views keep working.
+- **The network header has no public IP** — the lookup is disabled with
+  `--no-public-ip`, or the machine is offline / the service is blocked.  The
+  local IP, prefix and gateway still show.
 
 ## Changelog
 

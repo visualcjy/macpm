@@ -8,12 +8,12 @@
 #
 # Output:
 #   dist/macpm
-#   dist/macpm-2.1-macos-arm64.tar.gz
+#   dist/macpm-2.2-macos-arm64.tar.gz
 set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 DIST="$ROOT/dist"
-VERSION="2.1"
+VERSION="2.2"
 NAME="macpm-${VERSION}-macos-arm64"
 PYTHON=${PYTHON:-python3}
 

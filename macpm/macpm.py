@@ -7,13 +7,47 @@ from collections import deque
 
 import humanize
 import psutil
-from dashing import VSplit, HSplit, HGauge, HChart, VGauge, HBrailleChart, HBrailleFilledChart, Tile
+from blessed import Terminal
+from dashing import VSplit, HSplit, HGauge, HChart, VGauge, HBrailleChart, HBrailleFilledChart, TBox, Tile
 
+from .netinfo import NetworkInfoService, format_netinfo
+from .network import NetworkView
 from .processes import ProcessView
 from .sampler import Sampler
 from .sensors import SensorReader
+from .tui import RESET_FG, _bottom, _pad
 
-version = 'macpm v2.1'
+version = 'macpm v2.2'
+_DEFAULT_FOOTER = " q quit  1-4 view  ←/→ colour  Ctrl+R reset peaks "
+
+
+class FillVSplit(VSplit):
+    """VSplit that uses the rows dashing would leave blank.
+
+    dashing gives every panel ``height // count`` rows and drops the
+    remainder.  The first panel keeps that base height (the processor box
+    relies on it for the network-info row); the remainder is spread over the
+    other panels so the footer sits directly below the last one.
+    """
+
+    def _display(self, tbox, parent):
+        tbox = self._draw_borders_and_title(tbox)
+        if not self.items:
+            return
+        count = len(self.items)
+        base, extra = divmod(tbox.h, count)
+        heights = [base] * count
+        if count > 1 and extra:
+            share, remainder = divmod(extra, count - 1)
+            for index in range(1, count):
+                heights[index] += share
+                if index - 1 < remainder:
+                    heights[index] += 1
+        # dashing stores the row in the ``x`` field and the column in ``y``.
+        row = tbox.x
+        for item, height in zip(self.items, heights):
+            item._display(TBox(tbox.t, row, tbox.y, tbox.w, height), self)
+            row += height
 
 
 def _fit_title(title, width):
@@ -75,6 +109,8 @@ parser.add_argument('--avg', type=int, default=30,
                     help='Interval for averaged values (seconds)')
 parser.add_argument('--show_cores', nargs='?', const=True, default=False, type=_bool,
                     help='Choose show cores mode')
+parser.add_argument('--no-public-ip', action='store_true', default=False,
+                    help='do not look up the public IP and location')
 parser.add_argument('--version', action='version', version=version)
 
 args = parser.parse_args()
@@ -230,15 +266,35 @@ def parse_network_metrics(powermetrics_parse):
 class SensorPanel(Tile):
     """Bordered text box for SMC temperatures and fan speeds."""
 
-    def __init__(self, color=2, lines=None, details=None, **kw):
+    def __init__(self, color=2, lines=None, levels=None, **kw):
         super().__init__(color=color, **kw)
         self.lines = list(lines or [])
-        self.details = list(details or [])
+        self.levels = list(levels or [])
+
+    def _fan_bars(self, width):
+        half = max(0, (width - 2) // 2)
+        cells = []
+        for index in range(2):
+            if index >= len(self.levels):
+                cells.append(" " * half)
+                continue
+            label, level = self.levels[index]
+            if level is None:
+                cells.append(_fit_title(f"{label} --", half).ljust(half))
+                continue
+            level = max(0.0, min(100.0, level))
+            bar_width = max(1, half - len(label) - 1)
+            filled = int(round(bar_width * level / 100))
+            bar = "▉" * filled + "▏" * (bar_width - filled)
+            cells.append(_fit_title(f"{label} {bar}", half).ljust(half))
+        return "  ".join(cells)
 
     def _display(self, tbox, parent):
         tbox = self._draw_borders_and_title(tbox)
         width = max(0, tbox.w)
-        rows = self.lines + self.details
+        rows = list(self.lines)
+        if self.levels and len(rows) < tbox.h:
+            rows.append(self._fan_bars(max(0, width - 1)))
         for dx in range(tbox.h):
             text = rows[dx] if dx < len(rows) else ""
             text = _fit_title(text, width)
@@ -248,7 +304,9 @@ class SensorPanel(Tile):
 
 
 class DefaultView():
-    def __init__(self,soc_info_dict,args):
+    def __init__(self,soc_info_dict,args,netinfo=None):
+        self.netinfo = netinfo
+        self._term = None
         self.cpu_peak_power = 0
         self.gpu_peak_power = 0
         self.package_peak_power = 0
@@ -262,6 +320,7 @@ class DefaultView():
         self.construct(soc_info_dict,args)
         
     def construct(self,soc_info_dict,args):
+        self.show_cores = bool(args.show_cores)
         self.cpu1_gauge = HGauge(title="E-CPU Usage", val=0, color=args.color)
         self.cpu2_gauge = HGauge(title="P-CPU Usage", val=0, color=args.color)
         self.gpu_gauge = HGauge(title="GPU Usage", val=0, color=args.color)
@@ -387,7 +446,7 @@ class DefaultView():
         if args.show_cores:
             self.ui = HSplit(
                 self.processor_split,
-                VSplit(
+                FillVSplit(
                     self.memory_gauges,
                     self.sensor_panel,
                     self.power_charts,
@@ -398,7 +457,7 @@ class DefaultView():
         else:
             # Memory and the SMC panel share a row so the default view keeps
             # the vertical space available to the charts.
-            self.ui = VSplit(
+            self.ui = FillVSplit(
                 self.processor_split,
                 HSplit(self.memory_gauges, self.sensor_panel),
                 self.power_charts,
@@ -437,10 +496,66 @@ class DefaultView():
         self.avg_cpu_power_list = deque([], maxlen=max(1, int(args.avg / args.interval)))
         self.avg_gpu_power_list = deque([], maxlen=max(1, int(args.avg / args.interval)))
 
+    def _processor_spare_row(self, height):
+        """Row of the processor box left blank by dashing's fixed layout."""
+        if self.show_cores:
+            panel_height = height - 1
+        else:
+            items = len(getattr(self.ui, "items", ())) or 1
+            panel_height = (height - 1) // items
+        inner = panel_height - 2
+        gauges = len(self.processor_gauges)
+        if inner <= 0 or gauges <= 0:
+            return None
+        item_height = inner // gauges
+        if item_height < 1:
+            return None
+        used = item_height * gauges
+        if used >= inner:
+            return None
+        return 1 + used
+
+    def _processor_width(self, width):
+        if not self.show_cores:
+            return width
+        items = len(getattr(self.ui, "items", ())) or 1
+        return width // items
+
+    def _draw_extras(self, args):
+        term = self._term
+        if term is None:
+            term = self._term = Terminal()
+        width, height = term.width, term.height
+        if width < 20 or height < 6:
+            return
+        accent = term.color(args.color)
+        reset = RESET_FG
+        out = []
+        row = self._processor_spare_row(height)
+        if row is not None:
+            text = ""
+            # The per-core layout puts the core gauges right above this row;
+            # keep the network identity out of it and only show it in view 1.
+            if not self.show_cores and self.netinfo is not None:
+                local, public = self.netinfo.snapshot()
+                text = format_netinfo(local, public)
+            panel_width = self._processor_width(width)
+            out.append(
+                term.move(row, 2)
+                + accent
+                + _pad(text, max(0, panel_width - 4))
+                + reset
+            )
+        out.append(term.move(height - 1, 0) + accent + _bottom(width, _DEFAULT_FOOTER) + reset)
+        print("".join(out), end="", flush=True)
+
     def display(self,powermetrics_parse,args,sensors=None,update=True):
+        if self.netinfo is not None:
+            self.netinfo.refresh_local()
+            self.netinfo.refresh_public()
         if sensors is not None:
             self.sensor_panel.lines = sensors.lines()
-            self.sensor_panel.details = sensors.details()
+            self.sensor_panel.levels = sensors.fan_levels()
         if args.color != self.gpu_gauge.color:
             clear_console()
             self.gpu_gauge.color = args.color
@@ -481,6 +596,7 @@ class DefaultView():
             """
         if not update:
             self.ui.display()
+            self._draw_extras(args)
             return
         thermal_pressure = parse_thermal_pressure(powermetrics_parse)
         cpu_metrics_dict = parse_cpu_metrics(powermetrics_parse)
@@ -798,6 +914,7 @@ class DefaultView():
             ])
             self.network_io_charts.title = f"Network IO  (peak in:{format_number(self.network_in_bps_peak)}/s out:{format_number(self.network_out_bps_peak)}/s)"
             self.ui.display()
+            self._draw_extras(args)
 
 def get_process_summary(powermetrics_parse):
     """Two top-style lines for the process view: CPU, GPU and RAM usage."""
@@ -846,12 +963,22 @@ def get_avg(inlist):
 def begin(stdscr, sampler):
     soc_info_dict = sampler.soc
     sensors = SensorReader(soc_info_dict["name"])
+    netinfo = NetworkInfoService(public=not args.no_public_ip)
     view1 = None
     view1_show_cores = None
     process_view = None
+    network_view = None
     process_summary = []
     powermetrics_parse = None
     stdscr.nodelay(True)
+    # Translate terminal escape sequences (arrows, function keys) into
+    # curses KEY_* values.  Without this an arrow key arrives as ESC and
+    # quits the program instead of scrolling.
+    stdscr.keypad(True)
+    try:
+        curses.set_escdelay(25)
+    except (AttributeError, ValueError):
+        pass
     view = 2 if args.show_cores else 1
     soc_title = "{} (cores: {}E+{}P+{}GPU)".format(
         soc_info_dict["name"],
@@ -869,15 +996,18 @@ def begin(stdscr, sampler):
             if tick:
                 next_tick = time.monotonic() + interval
                 powermetrics_parse = sampler.sample()
-                if view != 3:
+                if view not in (3, 4):
                     sensors.read()
                 process_summary = get_process_summary(powermetrics_parse)
                 if view == 3 and process_view is not None:
                     process_view.sample()
+                if view == 4 and network_view is not None:
+                    network_view.sample()
 
             # Poll keys between samples so scrolling and view changes stay
             # responsive instead of queueing one key per refresh.
             redraw_process = tick
+            redraw_network = tick
             redraw_metrics = False
             refresh_metrics = False
 
@@ -894,6 +1024,9 @@ def begin(stdscr, sampler):
                     if view == 3 and process_view is not None:
                         process_view.color = args.color
                         redraw_process = True
+                    elif view == 4 and network_view is not None:
+                        network_view.color = args.color
+                        redraw_network = True
                     else:
                         redraw_metrics = True
                 elif key == curses.KEY_RIGHT:
@@ -901,6 +1034,9 @@ def begin(stdscr, sampler):
                     if view == 3 and process_view is not None:
                         process_view.color = args.color
                         redraw_process = True
+                    elif view == 4 and network_view is not None:
+                        network_view.color = args.color
+                        redraw_network = True
                     else:
                         redraw_metrics = True
                 elif key == curses.KEY_UP and view == 3:
@@ -909,6 +1045,12 @@ def begin(stdscr, sampler):
                 elif key == curses.KEY_DOWN and view == 3:
                     process_view.scroll(1)
                     redraw_process = True
+                elif key == curses.KEY_UP and view == 4:
+                    network_view.scroll(-1)
+                    redraw_network = True
+                elif key == curses.KEY_DOWN and view == 4:
+                    network_view.scroll(1)
+                    redraw_network = True
                 elif chr(key).lower() == 'q':
                     print("\nStopping...")
                     running = False
@@ -917,7 +1059,7 @@ def begin(stdscr, sampler):
                     changed = view != 1 or view1 is None or view1_show_cores != False
                     args.show_cores = False
                     if view1 is None:
-                        view1 = DefaultView(soc_info_dict=soc_info_dict, args=args)
+                        view1 = DefaultView(soc_info_dict=soc_info_dict, args=args, netinfo=netinfo)
                         view1_show_cores = False
                     elif view1_show_cores != False:
                         view1.construct(soc_info_dict, args)
@@ -932,7 +1074,7 @@ def begin(stdscr, sampler):
                     changed = view != 2 or view1 is None or view1_show_cores != True
                     args.show_cores = True
                     if view1 is None:
-                        view1 = DefaultView(soc_info_dict=soc_info_dict, args=args)
+                        view1 = DefaultView(soc_info_dict=soc_info_dict, args=args, netinfo=netinfo)
                         view1_show_cores = True
                     elif view1_show_cores != True:
                         view1.construct(soc_info_dict, args)
@@ -958,37 +1100,61 @@ def begin(stdscr, sampler):
                     clear_console()
                     redraw_process = True
                     refresh_metrics = False
+                elif chr(key) == '4':
+                    if network_view is None:
+                        network_view = NetworkView(args.color, netinfo=netinfo)
+                    else:
+                        network_view.color = args.color
+                    network_view.prime()
+                    view = 4
+                    clear_console()
+                    redraw_network = True
+                    refresh_metrics = False
                 elif key == 32 and view == 3:
                     process_view.toggle_pause()
                     redraw_process = True
                 elif chr(key).lower() == 's' and view == 3:
                     process_view.cycle_sort()
                     redraw_process = True
+                elif key == 32 and view == 4:
+                    network_view.toggle_pause()
+                    redraw_network = True
+                elif chr(key).lower() == 's' and view == 4:
+                    network_view.cycle_sort()
+                    redraw_network = True
+                elif key == 9 and view == 4:
+                    network_view.cycle_focus()
+                    redraw_network = True
                 elif key == 0x12:
                     # press ctrl+r to reset max and peak values
                     if view1 is not None:
-                        view1.__init__(soc_info_dict, args)
+                        view1.__init__(soc_info_dict, args, netinfo=netinfo)
                     sensors.reset_peaks()
                     if view == 3:
                         redraw_process = True
+                    elif view == 4:
+                        redraw_network = True
                     else:
                         refresh_metrics = True
 
             if not running:
                 break
 
-            if refresh_metrics and view != 3 and not tick:
+            if refresh_metrics and view not in (3, 4) and not tick:
                 powermetrics_parse = sampler.sample()
                 sensors.read()
                 process_summary = get_process_summary(powermetrics_parse)
                 next_tick = time.monotonic() + interval
 
-            if view == 3:
+            if view == 4:
+                if redraw_network:
+                    network_view.display(powermetrics_parse)
+            elif view == 3:
                 if redraw_process:
                     process_view.display(process_summary)
             elif powermetrics_parse is not None:
                 if view1 is None:
-                    view1 = DefaultView(soc_info_dict=soc_info_dict, args=args)
+                    view1 = DefaultView(soc_info_dict=soc_info_dict, args=args, netinfo=netinfo)
                     view1_show_cores = args.show_cores
                     clear_console()
                 if tick or refresh_metrics:

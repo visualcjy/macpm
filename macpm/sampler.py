@@ -40,9 +40,9 @@ _ENERGY_TO_J = {
 def calc_freq(states: list[tuple[str, int]], freqs: list[int]) -> tuple[float, float]:
     """Return (average active frequency in MHz, active residency ratio).
 
-    Mirrors the calculation used by macmon/Stats: skip DOWN/IDLE/OFF, weight
-    the remaining P-states by residency, and divide their residency by the
-    total.  ``freqs`` is the DVFS table for those active states.  If the table
+    Mirrors the calculation used by other IOReport monitors: skip
+    DOWN/IDLE/OFF, weight the remaining P-states by residency, and divide
+    their residency by the total.  ``freqs`` is the DVFS table for those active states.  If the table
     is shorter than the state list (the GPU on some chips has more P-states
     than table entries), the last known frequency is used for the extra states.
     """

@@ -1,5 +1,49 @@
 # Changelog
 
+## 2.2 — 2026-11-12
+
+### Added
+
+- **Network view** on key `4` — a rootless overview built from `nettop`: TCP
+  socket counts by state (`ESTABLISHED`, `LISTEN`, `CLOSE_WAIT`, `TIME_WAIT`),
+  UDP socket count, interface throughput, a listening table (address, PID,
+  process) and a per-process traffic table with socket count and download /
+  upload rates.  `Tab` switches the focused table, `s` cycles its sort column,
+  `↑` / `↓` scroll it and `Space` pauses sampling.  The traffic table
+  refreshes every 2 seconds and the full socket snapshot every 5 seconds while
+  the view is open.  `nettop` needs no root and sees sockets owned by root
+  daemons; sockets without an owner (typically `TIME_WAIT`) are not reported.
+- The network summary box has a line with the active IPv4 interface and prefix,
+  the default gateway, and the public IP with its city.  For Chinese addresses
+  the carrier abbreviation (Telecom, Unicom, Mobile) is appended after the
+  country code, e.g. `Shanghai, CN Telecom`.
+  The public lookup is one HTTPS request to `ipinfo.io` (falling back to
+  `ipwho.is`), cached for 10 minutes and disabled with `--no-public-ip`.
+
+### Changed
+
+- The network summary uses fixed-width fields, so the labels no longer move as
+  the counter and rate values change.  The traffic table is sorted by the
+  visible `↓/s` column by default; the combined rate is no longer a hidden sort
+  key.
+- The Temps & Fans panel now pairs each component's temperature with its peak
+  (CPU on one row, GPU on the next), followed by fan RPMs and one fan-load bar
+  per fan.  The bars omit the numeric percentage so they can use the full panel
+  width.  The network identity line is only shown in view 1, not in the
+  per-core view.
+- README: screenshots for the process and network views and refreshed
+  highlights.
+
+### Fixed
+
+- Arrow keys were delivered as a bare `ESC` — which quits macpm — because the
+  curses window never enabled keypad mode.  `↑` / `↓` now scroll the process
+  and network tables as documented.
+- The views reset only the foreground colour after drawing, not the whole SGR
+  state.  A full reset also cleared the black background set by curses, so the
+  terminal profile's background (often grey) showed through in the default,
+  process and network views.
+
 ## 2.1 — 2026-11-11
 
 ### Changed
@@ -15,7 +59,7 @@
 
 - **Temps & Fans panel** in the default view — hottest CPU and GPU sensor in
   °C and the current RPM of every fan, read from `AppleSMC` without root.
-- **Process view** on key `3` — a macmon-style two-box layout: a
+- **Process view** on key `3` — a two-box layout: a
   CPU/GPU/RAM summary box (with wired/active/inactive/free memory) and a
   process table with PID, NAME, USER, CPU%, MEM and GPU% columns, sorted with
   `s`, scrolled with `↑`/`↓` and paused with `Space`.  The table refreshes

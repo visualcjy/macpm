@@ -11,10 +11,14 @@ class SensorReaderTests(unittest.TestCase):
         reader.gpu_c = 43.07
         reader.fans = [{"id": 0, "rpm": 2317.6}, {"id": 1, "rpm": 2502.0}]
 
+        reader.cpu_peak = 61.5
+        reader.gpu_peak = 50.0
+
         self.assertEqual(
             reader.lines(),
             [
-                "CPU 52.4\u00b0C   GPU 43.1\u00b0C",
+                "CPU 52.4\u00b0C   peak 61.5\u00b0C",
+                "GPU 43.1\u00b0C   peak 50.0\u00b0C",
                 "Fan 1 2318 rpm  Fan 2 2502 rpm",
             ],
         )
@@ -24,7 +28,14 @@ class SensorReaderTests(unittest.TestCase):
         reader.ready = True
         reader.cpu_c = 40.0
 
-        self.assertEqual(reader.lines(), ["CPU 40.0\u00b0C   GPU --", "Fan: none"])
+        self.assertEqual(
+            reader.lines(),
+            [
+                "CPU 40.0\u00b0C   peak --",
+                "GPU --   peak --",
+                "Fan: none",
+            ],
+        )
 
     def test_unavailable_smc(self):
         reader = SensorReader("Apple M1")
@@ -39,38 +50,24 @@ class SensorReaderTests(unittest.TestCase):
         reader = SensorReader("Apple M1")
 
         self.assertEqual(reader.lines(), ["reading..."])
-        self.assertEqual(reader.details(), [])
+        self.assertEqual(reader.fan_levels(), [])
 
-    def test_details_include_peaks_and_fan_limits(self):
+    def test_fan_levels_are_percent_of_maximum(self):
         reader = SensorReader("Apple M3 Max")
         reader.ready = True
-        reader.cpu_c = 52.0
-        reader.gpu_c = 43.0
-        reader.cpu_peak = 61.5
-        reader.gpu_peak = 50.0
         reader.fans = [
-            {"id": 0, "rpm": 1000.0, "max_rpm": 6898.0},
-            {"id": 1, "rpm": 900.0, "max_rpm": 7450.0},
+            {"id": 0, "rpm": 3449.0, "max_rpm": 6898.0},
+            {"id": 1, "rpm": 7450.0, "max_rpm": 7450.0},
         ]
 
-        self.assertEqual(
-            reader.details(),
-            [
-                "CPU peak 61.5\u00b0C   GPU peak 50.0\u00b0C",
-                "Fan 1 max 6898  Fan 2 max 7450 rpm",
-            ],
-        )
+        self.assertEqual(reader.fan_levels(), [("F1", 50.0), ("F2", 100.0)])
 
-    def test_details_without_fans(self):
+    def test_fan_levels_without_a_maximum(self):
         reader = SensorReader("Apple M1")
         reader.ready = True
-        reader.cpu_peak = 45.0
-        reader.gpu_peak = 40.0
+        reader.fans = [{"id": 0, "rpm": 1000.0}]
 
-        self.assertEqual(
-            reader.details(),
-            ["CPU peak 45.0\u00b0C   GPU peak 40.0\u00b0C"],
-        )
+        self.assertEqual(reader.fan_levels(), [("F1", None)])
 
     def test_peak_and_reset(self):
         self.assertEqual(_peak(None, None), None)

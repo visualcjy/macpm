@@ -92,15 +92,19 @@ class SensorReader:
         self.gpu_peak = self.gpu_c
 
     def lines(self) -> list[str]:
-        """Two short lines that fit the panel in either layout."""
+        """Temperature, peak and fan rows for the panel."""
         if self.error is not None:
             return ["SMC unavailable", self.error]
         if not self.ready:
             return ["reading..."]
 
-        text = (
+        cpu = (
             f"CPU {_format_temperature(self.cpu_c)}   "
-            f"GPU {_format_temperature(self.gpu_c)}"
+            f"peak {_format_temperature(self.cpu_peak)}"
+        )
+        gpu = (
+            f"GPU {_format_temperature(self.gpu_c)}   "
+            f"peak {_format_temperature(self.gpu_peak)}"
         )
         if self.fans:
             fan_text = "  ".join(
@@ -108,21 +112,22 @@ class SensorReader:
             )
         else:
             fan_text = "Fan: none"
-        return [text, fan_text]
+        return [cpu, gpu, fan_text]
 
-    def details(self) -> list[str]:
-        """Extra readings for tall panels; the caller shows what fits."""
+    def fan_levels(self) -> list[tuple[str, Optional[float]]]:
+        """Fan labels and their current speed as a percentage of maximum."""
         if self.error is not None or not self.ready:
             return []
-        peak = (
-            f"CPU peak {_format_temperature(self.cpu_peak)}   "
-            f"GPU peak {_format_temperature(self.gpu_peak)}"
-        )
-        details = [peak]
-        if self.fans:
-            max_rpm = "  ".join(
-                f"Fan {fan['id'] + 1} max {_format_rpm_value(fan.get('max_rpm'))}"
-                for fan in self.fans
-            )
-            details.append(f"{max_rpm} rpm")
-        return details
+        levels = []
+        for fan in self.fans:
+            rpm = fan.get("rpm")
+            max_rpm = fan.get("max_rpm")
+            level = None
+            if (
+                isinstance(rpm, (int, float))
+                and isinstance(max_rpm, (int, float))
+                and max_rpm > 0
+            ):
+                level = max(0.0, min(100.0, rpm / max_rpm * 100))
+            levels.append((f"F{fan['id'] + 1}", level))
+        return levels
