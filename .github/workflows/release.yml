@@ -62,11 +62,46 @@ jobs:
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+      # Keep the release body in sync with the matching CHANGELOG section.
+      - name: Extract release notes
+        id: release_notes
+        run: |
+          python3 - <<'PY'
+          import os
+          import re
+
+          tag = os.environ["GITHUB_REF_NAME"]
+          version = tag[1:] if tag.startswith("v") else tag
+          text = open("CHANGELOG.md", encoding="utf-8").read()
+          match = re.search(
+              rf"^## {re.escape(version)}[^\n]*\n(.*?)(?=^## |\Z)",
+              text,
+              re.M | re.S,
+          )
+          if not match:
+              raise SystemExit(f"no CHANGELOG section for {version}")
+
+          body = match.group(1).strip()
+          body += (
+              "\n\n## Install\n\n"
+              f"```sh\npython3 -m pip install --upgrade macpm=={version}\n```\n\n"
+              "or with Homebrew:\n\n"
+              "```sh\nbrew install visualcjy/macpm/macpm\n```\n\n"
+              f"The standalone arm64 tarball (`macpm-{version}-macos-arm64.tar.gz`) "
+              "is attached below.\n"
+          )
+          with open("release-notes.md", "w", encoding="utf-8") as handle:
+              handle.write(body)
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
+              handle.write(f"version={version}\n")
+          PY
       - uses: actions/download-artifact@v4
         with:
           name: python-package
           path: dist
       - uses: softprops/action-gh-release@v2
         with:
+          name: macpm ${{ steps.release_notes.outputs.version }}
+          body_path: release-notes.md
           files: dist/*
-          generate_release_notes: true
