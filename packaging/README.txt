@@ -1,4 +1,4 @@
-macpm 2.2 - rootless performance monitor for Apple Silicon
+macpm 3.0 - rootless performance monitor for Apple Silicon
 ==========================================================
 
 No Python installation is required.  The binaries bundle their own runtime.

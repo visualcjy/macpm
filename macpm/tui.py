@@ -73,6 +73,18 @@ def _border(width: int, left: str, right: str = "") -> str:
     return "┌" + left + "─" * max(0, inner - _text_width(left) - _text_width(right)) + right + "┐"
 
 
+def app_label() -> str:
+    """``macpm v3.0`` — shown at the start of every footer."""
+    from . import __version__
+
+    return f"macpm v{__version__}"
+
+
+def footer(text: str) -> str:
+    """Prefix a hint line with the app name and version."""
+    return f" {app_label()} · {text.strip()} "
+
+
 def _bottom(width: int, text: str) -> str:
     inner = max(0, width - 2)
     text = _fit(text, inner)

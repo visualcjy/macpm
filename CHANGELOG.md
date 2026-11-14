@@ -1,5 +1,111 @@
 # Changelog
 
+## 3.0 — 2026-11-14
+
+The Linux release.  The same package and the same TUI now run on x86_64 and
+arm64 Linux, and the GPU view grew into a per-card monitor that scales from one
+Apple GPU to a 64-card accelerator server.  Verified on 16× Iluvatar BI-V150S,
+64× Denglin KS58, 8× Techo TECO_AICARD_01 and 8× RTX 4090.
+
+### Added
+
+- **Linux backend** (`macpm/backend.py`, `macpm/linux_backend/`): the platform
+  is chosen at runtime, and every reading is normalised into the powermetrics
+  shaped sample the UI already understood, so all four views and key bindings
+  are unchanged.
+  - CPU: per-core utilisation from `/proc/stat`, frequency from
+    `cpufreq/scaling_cur_freq` (residency-weighted when
+    `cpu/stats/time_in_state` exists), and an E/P split inferred from
+    `topology/core_type`, `cpu_capacity` or `cpuinfo_max_freq`.
+  - Power: RAPL `energy_uj` (root on kernels >= 5.10), GPU hwmon power and the
+    battery's `power_now` as a whole-system fallback.
+  - GPU: amdgpu (`gpu_busy_percent`, `pp_dpm_sclk`, hwmon), Intel i915/xe
+    (frequency plus aggregate DRM `fdinfo` engine time) and NVIDIA via
+    `nvidia-smi`.
+  - Thermals: hwmon temperatures/fans classified by chip name and label, plus
+    a PSI/x86-throttle approximation of the thermal state.
+  - Process view: per-process GPU time from `drm-engine-*` `fdinfo`; Linux lets
+    `psutil` read every user's CPU/memory as root.
+  - Network view: `/proc/net/{tcp,tcp6,udp,udp6}` for counts and listeners and
+    `ss -tanie` `tcp_info` joined by inode for the per-process traffic table
+    (TCP only).
+  - Capabilities say what the kernel and permission level actually expose;
+    everything else is shown as `n/a` instead of a fake zero, and the UI hides
+    panels it cannot fill.
+- **GPU view** on key `5` — one table with **two lines per card**: the metrics
+  line (utilisation bar, clock, power, a 10-cell VRAM bar, temperature) and the
+  processes on that card (`PID NAME [cards] GPU% MEM`), with the served model
+  name right-aligned.  A process holding several cards appears under each of
+  them with its range in brackets; a card with more processes than fit shows
+  `… +N`.  `s` cycles the in-card order (PID → NAME → MEM), `↑` / `↓` turn
+  whole pages and the footer shows `Page N/M`.  A single-GPU machine keeps the
+  card summary and the separate process table.
+- **GPU INFO box** above the table: vendor card name, device count, card count
+  and dies per card (devices ÷ unique serials), driver, CUDA, PCIe link
+  (maximum, so idle cards do not read as generation 1) and VBIOS — each hidden
+  when the tool does not report it.  Consumer cards that report `[N/A]` serials
+  leave the card/die counts out instead of guessing.
+- **Vendor accelerator backends** — cards with no DRM counters are read through
+  the vendor's NVML-style CLI: `ixsmi` (Iluvatar / 天数, `--query-gpu`),
+  `dlsmi` (Denglin / 登临, `--query-gpu`) and `teco-smi` (Techo / 太初,
+  `--query-device`).  Each tool's switch and property names are mapped onto the
+  same fields, the power property is negotiated per tool, and the binaries are
+  found on `PATH`, in their install directories or via `MACPM_IXSMI`,
+  `MACPM_DLSMI` and `MACPM_TECO`.
+- **Vendor compute processes** feed the GPU view: `ixsmi pmon` joined with
+  `--query-compute-apps` (memory), `dlsmi --query-compute-apps` and
+  `teco-smi pmon`.  One row per PID with the cards it holds (compressed to
+  `0-7`), its card memory and the vendor's GPU% where the tool reports one
+  (`—` otherwise, e.g. `dlsmi`).  Processes that hold several cards are listed
+  under each of them, and `teco-smi`'s per-device repetition is preserved
+  rather than pretending a process lives on one card.
+- **Served model name** on the process line, right-aligned: resolved from the
+  launcher's command line (`--served-model-name`, `--model`, `--model-path`,
+  `--model-id`, `vllm serve`, `sglang.launch_server`, TGI, llama.cpp, including
+  k8s `bash -c` wrappers) by walking the parent chain, cached for ten seconds.
+  Only procfs is read; model directories are never opened because a stalled
+  network mount can block that indefinitely.
+- **NVIDIA GPU view** — one `nvidia-smi --query-gpu` call for the card rows,
+  `--query-compute-apps` (joined with `pmon` for SM%) for the process lines and
+  the same tool for the INFO box.  `nvidia-smi` is resolved from
+  `MACPM_NVIDIA_SMI`, `PATH` or the WSL mount, and NVIDIA DRM nodes are skipped
+  when `nvidia-smi` is available so cards are not listed twice.
+- **`python3 -m macpm.probe`** — a standard-library inventory (cards, drivers,
+  vendor tools, capability report) for compute nodes, with no psutil or
+  terminal needed.  `macpm-dump --capabilities` prints the platform, root
+  state and the same report.
+- **Deterministic tests on any machine** — `MACPM_SYSROOT` replays a captured
+  `/proc` + `/sys` tree, `MACPM_PLATFORM` forces the Linux backend, and
+  `tests/linux_fixtures.py` builds hybrid x86, arm64 big.LITTLE, multi-card and
+  empty trees.
+- Every view's footer starts with the app name and version
+  (`macpm v3.0 · q quit …`), so a screenshot or pasted frame identifies the
+  build.
+
+### Changed
+
+- CoreFoundation/IOKit/IOReport/AppleSMC are loaded lazily, so importing macpm
+  (and `--version` / `--help`) works on platforms without those frameworks.
+- The UI builds its gauges from the detected capabilities: no E cluster means a
+  single `CPU Usage` gauge, no ANE means no ANE gauge, no GPU means no GPU
+  gauge, and the power panel is hidden when no power source exists.
+- The default route and public-IP lookup use `urllib` instead of `curl`, and
+  `ip route` / `/proc/net/route` instead of `route -n get default` on Linux.
+- The sensor panel says `sensors unavailable` instead of `SMC unavailable`
+  (the backend may be hwmon).
+
+### Fixed
+
+- NVIDIA GPUs were listed twice on drivers that expose DRM nodes (16 rows for
+  8 cards); the DRM duplicate is skipped when `nvidia-smi` is present.
+- Drivers that reject `cuda_version` (e.g. 580) made the whole INFO query fail;
+  the query now falls back to the remaining fields.
+- `teco-smi` cards/dies are no longer derived from serials: it exposes eight
+  cards of four SDAA dies each without a board grouping, so only the device
+  count is shown.
+- VRAM cells pad the used-memory number to a fixed width, so busy and idle
+  cards keep their bars aligned.
+
 ## 2.2 — 2026-11-12
 
 ### Added

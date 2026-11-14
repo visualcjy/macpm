@@ -12,16 +12,21 @@ from __future__ import annotations
 import json
 import os
 import socket
+import struct
 import subprocess
 import threading
 import time
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from typing import Callable, Optional
 
 import psutil
 
+from .backend import platform_name
+
 ROUTE = "/sbin/route"
-CURL = "/usr/bin/curl"
+IP = "/usr/sbin/ip"
 
 LOCAL_TTL = 30.0
 PUBLIC_TTL = 600.0
@@ -80,7 +85,74 @@ def _parse_route(text: str) -> tuple[str, str]:
     return gateway, interface
 
 
+def _parse_ip_route(text: str) -> tuple[str, str]:
+    """Extract ``(gateway, interface)`` from ``ip route show default``.
+
+    Example: ``default via 10.0.0.1 dev eth0 proto dhcp metric 100``.
+    """
+    for line in text.splitlines():
+        fields = line.split()
+        if not fields or fields[0] != "default":
+            continue
+        gateway = ""
+        interface = ""
+        for index, token in enumerate(fields):
+            if token == "via" and index + 1 < len(fields):
+                gateway = fields[index + 1]
+            elif token == "dev" and index + 1 < len(fields):
+                interface = fields[index + 1]
+        return gateway, interface
+    return "", ""
+
+
+def _read_proc_net_route() -> tuple[str, str]:
+    """Fallback parser for ``/proc/net/route`` (hex, little-endian)."""
+    try:
+        with open("/proc/net/route", "r", encoding="ascii", errors="replace") as handle:
+            lines = handle.read().splitlines()
+    except OSError:
+        return "", ""
+    for line in lines[1:]:
+        fields = line.split()
+        if len(fields) < 3:
+            continue
+        try:
+            destination = int(fields[1], 16)
+            gateway = int(fields[2], 16)
+        except ValueError:
+            continue
+        if destination != 0:
+            continue
+        try:
+            address = socket.inet_ntoa(struct.pack("<I", gateway))
+        except OSError:
+            address = ""
+        return address, fields[0]
+    return "", ""
+
+
+def _read_default_route_linux() -> tuple[str, str]:
+    try:
+        result = subprocess.run(
+            [IP, "route", "show", "default"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=2.0,
+            env={**os.environ, "LC_ALL": "C"},
+        )
+    except (OSError, subprocess.SubprocessError):
+        result = None
+    if result is not None and result.returncode == 0:
+        gateway, interface = _parse_ip_route(result.stdout.decode("utf-8", "replace"))
+        if gateway or interface:
+            return gateway, interface
+    return _read_proc_net_route()
+
+
 def _read_default_route() -> tuple[str, str]:
+    if platform_name() != "macos":
+        return _read_default_route_linux()
     try:
         result = subprocess.run(
             [ROUTE, "-n", "get", "default"],
@@ -175,21 +247,24 @@ _ENDPOINTS = (
 
 
 def _http_get(url: str, timeout: float = HTTP_TIMEOUT) -> Optional[dict]:
+    """Fetch JSON with the standard library (no curl dependency)."""
+    request = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "macpm",
+            "Accept": "application/json",
+            "Connection": "close",
+        },
+    )
     try:
-        result = subprocess.run(
-            [CURL, "-fsS", "--connect-timeout", "2", "--max-time", str(int(timeout)), url],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            timeout=timeout + 1.0,
-            env={**os.environ, "LC_ALL": "C"},
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    if result.returncode != 0:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            if getattr(response, "status", 200) != 200:
+                return None
+            payload = response.read(1 << 20)
+    except (OSError, ValueError, urllib.error.URLError):
         return None
     try:
-        return json.loads(result.stdout.decode("utf-8", "replace"))
+        return json.loads(payload.decode("utf-8", "replace"))
     except (UnicodeDecodeError, ValueError):
         return None
 

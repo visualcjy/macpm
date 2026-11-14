@@ -43,7 +43,7 @@ class SensorReaderTests(unittest.TestCase):
 
         self.assertEqual(
             reader.lines(),
-            ["SMC unavailable", "AppleSMC service not found"],
+            ["sensors unavailable", "AppleSMC service not found"],
         )
 
     def test_initial_state(self):

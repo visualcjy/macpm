@@ -2,176 +2,47 @@
 
 from __future__ import annotations
 
-import ctypes
 import os
 import pwd
 import re
+import shutil
 import subprocess
 import time
-from ctypes import POINTER, byref, c_char_p, c_longlong, c_uint32, c_void_p
 from dataclasses import dataclass
 from typing import Optional
 
 import psutil
 from blessed import Terminal
 
-from .tui import RESET_FG, _border, _bottom, _center, _fit, _format_mem, _pad, _text_width
+from .backend import platform_name, process_gpu_reader
+from .tui import (  # noqa: F401 - _fit/_text_width are re-exported for tests
+    RESET_FG,
+    _border,
+    _bottom,
+    _center,
+    _fit,
+    _format_mem,
+    _pad,
+    _text_width,
+    footer,
+)
 
 # The helpers are re-exported here for callers that imported them from this
 # module before they moved to ``macpm.tui``.
 
 # -- GPU time per process ------------------------------------------------
 #
-# The GPU's IOAccelerator user clients expose an accumulatedGPUtime counter in
-# the IORegistry.  Walking them gives GPU usage per process without root, using
-# the same per-process GPU counter the system tools read.
+# macOS walks the IOAccelerator user clients (macpm.macos_gpu); Linux reads
+# DRM fdinfo (macpm.linux_backend.proc).  ``backend.process_gpu_reader`` picks
+# the right one and returns None when the platform has no usable counter.
 
-_CF = ctypes.CDLL("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")
-_IOKIT = ctypes.CDLL("/System/Library/Frameworks/IOKit.framework/IOKit")
-
-_CF.CFStringCreateWithCString.argtypes = [c_void_p, c_char_p, c_uint32]
-_CF.CFStringCreateWithCString.restype = c_void_p
-_CF.CFStringGetCString.argtypes = [c_void_p, c_char_p, ctypes.c_long, c_uint32]
-_CF.CFStringGetCString.restype = ctypes.c_bool
-_CF.CFArrayGetCount.argtypes = [c_void_p]
-_CF.CFArrayGetCount.restype = ctypes.c_long
-_CF.CFArrayGetValueAtIndex.argtypes = [c_void_p, ctypes.c_long]
-_CF.CFArrayGetValueAtIndex.restype = c_void_p
-_CF.CFDictionaryGetValue.argtypes = [c_void_p, c_void_p]
-_CF.CFDictionaryGetValue.restype = c_void_p
-_CF.CFNumberGetValue.argtypes = [c_void_p, ctypes.c_int, c_void_p]
-_CF.CFNumberGetValue.restype = ctypes.c_bool
-_CF.CFGetTypeID.argtypes = [c_void_p]
-_CF.CFGetTypeID.restype = ctypes.c_ulong
-_CF.CFStringGetTypeID.restype = ctypes.c_ulong
-_CF.CFArrayGetTypeID.restype = ctypes.c_ulong
-_CF.CFDictionaryGetTypeID.restype = ctypes.c_ulong
-_CF.CFNumberGetTypeID.restype = ctypes.c_ulong
-_CF.CFRelease.argtypes = [c_void_p]
-
-_IOKIT.IOServiceMatching.argtypes = [c_char_p]
-_IOKIT.IOServiceMatching.restype = c_void_p
-_IOKIT.IOServiceGetMatchingServices.argtypes = [c_uint32, c_void_p, POINTER(c_uint32)]
-_IOKIT.IOServiceGetMatchingServices.restype = ctypes.c_int
-_IOKIT.IOIteratorNext.argtypes = [c_uint32]
-_IOKIT.IOIteratorNext.restype = c_uint32
-_IOKIT.IOObjectRelease.argtypes = [c_uint32]
-_IOKIT.IORegistryEntryGetChildIterator.argtypes = [c_uint32, c_char_p, POINTER(c_uint32)]
-_IOKIT.IORegistryEntryGetChildIterator.restype = ctypes.c_int
-_IOKIT.IORegistryEntryCreateCFProperty.argtypes = [c_uint32, c_void_p, c_void_p, c_uint32]
-_IOKIT.IORegistryEntryCreateCFProperty.restype = c_void_p
-
-_UTF8 = 0x08000100
-_CF_NUMBER_SINT64 = 4
-
-
-def _cfstr(value: str) -> int:
-    return _CF.CFStringCreateWithCString(None, value.encode("utf-8"), _UTF8)
-
-
-def _cf_string(ref) -> str:
-    if not ref:
-        return ""
-    buf = ctypes.create_string_buffer(256)
-    if _CF.CFStringGetCString(ref, buf, len(buf), _UTF8):
-        return buf.value.decode("utf-8", "replace")
-    return ""
-
-
-def _cf_number(ref) -> Optional[int]:
-    out = c_longlong(0)
-    if _CF.CFNumberGetValue(ref, _CF_NUMBER_SINT64, byref(out)):
-        return out.value
-    return None
-
-
-_CREATOR_KEY = _cfstr("IOUserClientCreator")
-_USAGE_KEY = _cfstr("AppUsage")
-_GPU_TIME_KEY = _cfstr("accumulatedGPUTime")
-
-
-def _client_pid(client) -> Optional[int]:
-    prop = _IOKIT.IORegistryEntryCreateCFProperty(client, _CREATOR_KEY, None, 0)
-    if not prop:
-        return None
-    try:
-        if _CF.CFGetTypeID(prop) != _CF.CFStringGetTypeID():
-            return None
-        creator = _cf_string(prop)
-    finally:
-        _CF.CFRelease(prop)
-    if not creator.startswith("pid "):
-        return None
-    try:
-        return int(creator[4:].split(",", 1)[0])
-    except ValueError:
-        return None
-
-
-def _client_gpu_ns(client) -> int:
-    prop = _IOKIT.IORegistryEntryCreateCFProperty(client, _USAGE_KEY, None, 0)
-    if not prop:
-        return 0
-    try:
-        if _CF.CFGetTypeID(prop) != _CF.CFArrayGetTypeID():
-            return 0
-        total = 0
-        for index in range(_CF.CFArrayGetCount(prop)):
-            entry = _CF.CFArrayGetValueAtIndex(prop, index)
-            if not entry or _CF.CFGetTypeID(entry) != _CF.CFDictionaryGetTypeID():
-                continue
-            value = _CF.CFDictionaryGetValue(entry, _GPU_TIME_KEY)
-            if value and _CF.CFGetTypeID(value) == _CF.CFNumberGetTypeID():
-                ns = _cf_number(value)
-                if ns is not None and ns >= 0:
-                    total += ns
-        return total
-    finally:
-        _CF.CFRelease(prop)
-
-
-def read_gpu_times() -> Optional[dict[int, int]]:
-    """Accumulated GPU time in ns per pid, or None when the registry fails."""
-    matching = _IOKIT.IOServiceMatching(b"IOAccelerator")
-    if not matching:
-        return None
-    iterator = c_uint32()
-    if _IOKIT.IOServiceGetMatchingServices(0, matching, byref(iterator)) != 0:
-        return None
-
-    totals: dict[int, int] = {}
-    try:
-        while True:
-            service = _IOKIT.IOIteratorNext(iterator)
-            if not service:
-                break
-            try:
-                children = c_uint32()
-                if _IOKIT.IORegistryEntryGetChildIterator(
-                    service, b"IOService", byref(children)
-                ) != 0:
-                    continue
-                try:
-                    while True:
-                        client = _IOKIT.IOIteratorNext(children)
-                        if not client:
-                            break
-                        try:
-                            try:
-                                pid = _client_pid(client)
-                                if pid is not None:
-                                    totals[pid] = totals.get(pid, 0) + _client_gpu_ns(client)
-                            except Exception:
-                                pass
-                        finally:
-                            _IOKIT.IOObjectRelease(client)
-                finally:
-                    _IOKIT.IOObjectRelease(children)
-            finally:
-                _IOKIT.IOObjectRelease(service)
-    finally:
-        _IOKIT.IOObjectRelease(iterator)
-    return totals
+def _ps_arguments() -> list:
+    """``ps`` invocation that works on both BSD and procps."""
+    if platform_name() == "macos":
+        return ["/bin/ps", "-axo", "pid=,uid=,rss=,time=,ucomm="]
+    executable = shutil.which("ps") or "/bin/ps"
+    # ``ucomm`` is BSD-only; ``comm`` is the portable name.
+    return [executable, "-eo", "pid=,uid=,rss=,time=,comm="]
 
 
 # -- fallback for processes psutil cannot read ---------------------------
@@ -183,7 +54,12 @@ _PS_TIME = re.compile(
 
 
 def _parse_ps_time(text: str) -> Optional[float]:
-    match = _PS_TIME.match(text.strip())
+    text = text.strip()
+    try:
+        return float(text)  # procps ``times=`` prints plain seconds
+    except ValueError:
+        pass
+    match = _PS_TIME.match(text)
     if not match:
         return None
     parts = match.groupdict()
@@ -215,7 +91,7 @@ def _parse_ps(text: str) -> list[tuple[int, int, int, float, str]]:
 def _read_ps() -> Optional[list[tuple[int, int, int, float, str]]]:
     try:
         child = subprocess.Popen(
-            ["/bin/ps", "-axo", "pid=,uid=,rss=,time=,ucomm="],
+            _ps_arguments(),
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             env={**os.environ, "LC_ALL": "C"},
@@ -245,6 +121,14 @@ class ProcessRow:
     cpu_pct: float
     mem_bytes: int
     gpu_pct: float
+    # Vendor *smi tools report the owning card and memory but usually no SM
+    # percentage; ``util_known`` tells the GPU view whether ``gpu_pct`` means
+    # anything (otherwise it renders a dash).
+    gpu_card: Optional[str] = None
+    gpu_mem_mb: Optional[float] = None
+    util_known: bool = True
+    model: Optional[str] = None
+    gpu_list: Optional[list] = None
 
 
 class ProcessSampler:
@@ -259,11 +143,21 @@ class ProcessSampler:
         self._prev_time: Optional[float] = None
         self._cpu_count = psutil.cpu_count(logical=True) or 1
         self._users: dict[int, str] = {}
+        self._gpu_reader = None
         try:
-            self.gpu_available = read_gpu_times() is not None
+            self._gpu_reader = process_gpu_reader()
         except Exception:
-            self.gpu_available = False
+            self._gpu_reader = None
+        self.gpu_available = self._gpu_reader is not None
         self.error: Optional[str] = None
+
+    def _gpu_times(self):
+        if self._gpu_reader is None:
+            return None
+        try:
+            return self._gpu_reader()
+        except Exception:
+            return None
 
     def _username(self, uid: Optional[int]) -> str:
         if uid is None:
@@ -286,10 +180,7 @@ class ProcessSampler:
     def sample(self) -> list[ProcessRow]:
         now = time.monotonic()
         elapsed = now - self._prev_time if self._prev_time is not None else 0.0
-        try:
-            gpu_times = read_gpu_times() if self.gpu_available else None
-        except Exception:
-            gpu_times = None
+        gpu_times = self._gpu_times()
         self.error = None
         rows: list[ProcessRow] = []
         prev_cpu: dict[tuple[int, float], float] = {}
@@ -416,8 +307,8 @@ _HEADERS = {
 _WIDTHS = {"pid": 6, "user": 10, "cpu": 7, "mem": 7, "gpu": 6}
 _NUMERIC = {"pid", "cpu", "mem", "gpu"}
 _SORT_CYCLE = ["cpu", "mem", "gpu", "pid", "name", "user"]
-_FOOTER = " q quit  1-4 view  s sort  ↑/↓ scroll  Space pause  ←/→ colour "
-_FOOTER_PAUSED = " q quit  1-4 view  s sort  ↑/↓ scroll  Space resume  ←/→ colour "
+_FOOTER = footer("q quit  1-5 view  s sort  ↑/↓ scroll  Space pause  ←/→ colour")
+_FOOTER_PAUSED = footer("q quit  1-5 view  s sort  ↑/↓ scroll  Space resume  ←/→ colour")
 
 
 class ProcessView:

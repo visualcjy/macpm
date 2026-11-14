@@ -13,12 +13,14 @@ from dashing import VSplit, HSplit, HGauge, HChart, VGauge, HBrailleChart, HBrai
 from .netinfo import NetworkInfoService, format_netinfo
 from .network import NetworkView
 from .processes import ProcessView
-from .sampler import Sampler
+from .backend import create_sampler, platform_name
+from .capabilities import MACOS_CAPABILITIES
+from .gpuview import GpuView
 from .sensors import SensorReader
-from .tui import RESET_FG, _bottom, _pad
+from .tui import RESET_FG, _bottom, _pad, footer
 
-version = 'macpm v2.2'
-_DEFAULT_FOOTER = " q quit  1-4 view  ←/→ colour  Ctrl+R reset peaks "
+version = 'macpm v3.0'
+_DEFAULT_FOOTER = footer("q quit  1-5 view  ←/→ colour  Ctrl+R reset peaks")
 
 
 class FillVSplit(VSplit):
@@ -98,9 +100,15 @@ def _bool(value):
     return str(value).strip().lower() in ('1', 'true', 'yes', 'on')
 
 
+_PLATFORM_DESC = (
+    'performance monitoring CLI tool for Linux (run as root for power/GPU)'
+    if platform_name() == 'linux'
+    else 'rootless performance monitoring CLI tool for Apple Silicon'
+)
+
 parser = argparse.ArgumentParser(
     prog='macpm',
-    description=f'{version}: rootless performance monitoring CLI tool for Apple Silicon')
+    description=f'{version}: {_PLATFORM_DESC}')
 parser.add_argument('--interval', type=int, default=1,
                     help='Display interval and sampling interval (seconds)')
 parser.add_argument('--color', type=int, default=2,
@@ -151,6 +159,9 @@ def get_ram_metrics_dict():
         "active_GB": convert_to_GB(getattr(ram_metrics, "active", 0)),
         "inactive_GB": convert_to_GB(getattr(ram_metrics, "inactive", 0)),
         "phys_free_GB": convert_to_GB(getattr(ram_metrics, "free", 0)),
+        "cached_GB": convert_to_GB(getattr(ram_metrics, "cached", 0)),
+        "buffers_GB": convert_to_GB(getattr(ram_metrics, "buffers", 0)),
+        "slab_GB": convert_to_GB(getattr(ram_metrics, "slab", 0)),
         "swap_total_GB": swap_total_GB,
         "swap_used_GB": swap_used_GB,
         "swap_free_GB": swap_free_GB,
@@ -162,78 +173,70 @@ def parse_thermal_pressure(powermetrics_parse):
     return powermetrics_parse["thermal_pressure"]
 
 def parse_cpu_metrics(powermetrics_parse):
-    e_core = []
-    p_core = []
+    """Flatten the cluster list into the key/value dict the view updates from.
+
+    Cluster names come from the sampler (``E-Cluster``/``P-Cluster`` on Apple
+    Silicon; the same names on Linux so the view code is shared).  A platform
+    without E cores simply produces a single P cluster and an ``E-Cluster``
+    aggregate of 0.
+    """
     cpu_metrics = powermetrics_parse["processor"]
     cpu_metric_dict = {}
-    # cpu_clusters
-    cpu_clusters = cpu_metrics["clusters"]
-    e_total_idle_ratio = 0
+
+    e_core = []
+    p_core = []
+    e_idle_total = 0.0
     e_core_count = 0
-    p_total_idle_ratio = 0
+    p_idle_total = 0.0
     p_core_count = 0
-    for cluster in cpu_clusters:
+    e_freqs = []
+    p_freqs = []
+
+    for cluster in cpu_metrics["clusters"]:
         name = cluster["name"]
-        cpu_metric_dict[name+"_freq_Mhz"] = int(cluster["freq_hz"]/(1e6))
-        cpu_metric_dict[name+"_active"] = int((1 - cluster["idle_ratio"])*100)
+        letter = "E" if name[:1].upper() == "E" else "P"
+        cpu_metric_dict[name + "_freq_Mhz"] = int(cluster["freq_hz"] / (1e6))
+        cpu_metric_dict[name + "_active"] = int((1 - cluster["idle_ratio"]) * 100)
+        if letter == "E":
+            e_freqs.append(int(cluster["freq_hz"] / (1e6)))
+        else:
+            p_freqs.append(int(cluster["freq_hz"] / (1e6)))
+
         for cpu in cluster["cpus"]:
-            name = 'E-Cluster' if name[0] == 'E' else 'P-Cluster'
-            core = e_core if name[0] == 'E' else p_core
-            core.append(cpu["cpu"])
-            cpu_metric_dict[name + str(cpu["cpu"]) + "_freq_Mhz"] = int(cpu["freq_hz"] / (1e6))
-            #there  is no down_ratio in M1
-            if cluster.get("down_ratio") is None:
-                idle_ratio = cpu["idle_ratio"]
-            else:
-                idle_ratio = cluster["down_ratio"] + (1 - cluster["down_ratio"]) * (cpu["idle_ratio"] + cpu["down_ratio"])
-            cpu_metric_dict[name + str(cpu["cpu"]) + "_active"] = int((1 - idle_ratio) * 100)           
-            if name[0] == 'E':
-                e_total_idle_ratio += idle_ratio
+            index = cpu["cpu"]
+            cpu_metric_dict[name + str(index) + "_freq_Mhz"] = int(
+                cpu["freq_hz"] / (1e6)
+            )
+            idle_ratio = cpu["idle_ratio"]
+            cpu_metric_dict[name + str(index) + "_active"] = int((1 - idle_ratio) * 100)
+            if letter == "E":
+                e_core.append(index)
+                e_idle_total += idle_ratio
                 e_core_count += 1
             else:
-                p_total_idle_ratio += idle_ratio
+                p_core.append(index)
+                p_idle_total += idle_ratio
                 p_core_count += 1
-    
-    cpu_metric_dict["E-Cluster_active"] = int((1 - e_total_idle_ratio/e_core_count)*100) if e_core_count else 0
-    cpu_metric_dict["P-Cluster_active"] = int((1 - p_total_idle_ratio/p_core_count)*100) if p_core_count else 0
+
+    cpu_metric_dict["E-Cluster_active"] = (
+        int((1 - e_idle_total / e_core_count) * 100) if e_core_count else 0
+    )
+    cpu_metric_dict["P-Cluster_active"] = (
+        int((1 - p_idle_total / p_core_count) * 100) if p_core_count else 0
+    )
+    cpu_metric_dict["E-Cluster_freq_Mhz"] = max(e_freqs) if e_freqs else 0
+    cpu_metric_dict["P-Cluster_freq_Mhz"] = max(p_freqs) if p_freqs else 0
     cpu_metric_dict["e_core"] = e_core
     cpu_metric_dict["p_core"] = p_core
-    if "E-Cluster_active" not in cpu_metric_dict:
-        # M1 Ultra
-        cpu_metric_dict["E-Cluster_active"] = int(
-            (cpu_metric_dict["E0-Cluster_active"] + cpu_metric_dict["E1-Cluster_active"])/2)
-    if "E-Cluster_freq_Mhz" not in cpu_metric_dict:
-        # M1 Ultra
-        cpu_metric_dict["E-Cluster_freq_Mhz"] = max(
-            cpu_metric_dict["E0-Cluster_freq_Mhz"], cpu_metric_dict["E1-Cluster_freq_Mhz"])
-    if "P-Cluster_active" not in cpu_metric_dict:
-        if "P2-Cluster_active" in cpu_metric_dict:
-            # M1 Ultra
-            cpu_metric_dict["P-Cluster_active"] = int((cpu_metric_dict["P0-Cluster_active"] + cpu_metric_dict["P1-Cluster_active"] +
-                                                      cpu_metric_dict["P2-Cluster_active"] + cpu_metric_dict["P3-Cluster_active"]) / 4)
-        else:
-            cpu_metric_dict["P-Cluster_active"] = int(
-                (cpu_metric_dict["P0-Cluster_active"] + cpu_metric_dict["P1-Cluster_active"])/2)
-    if "P-Cluster_freq_Mhz" not in cpu_metric_dict:
-        if "P2-Cluster_freq_Mhz" in cpu_metric_dict:
-            # M1 Ultra
-            freqs = [
-                cpu_metric_dict["P0-Cluster_freq_Mhz"],
-                cpu_metric_dict["P1-Cluster_freq_Mhz"],
-                cpu_metric_dict["P2-Cluster_freq_Mhz"],
-                cpu_metric_dict["P3-Cluster_freq_Mhz"]]
-            cpu_metric_dict["P-Cluster_freq_Mhz"] = max(freqs)
-        else:
-            cpu_metric_dict["P-Cluster_freq_Mhz"] = max(
-                cpu_metric_dict["P0-Cluster_freq_Mhz"], cpu_metric_dict["P1-Cluster_freq_Mhz"])
-    # power
-    cpu_metric_dict["ane_W"] = cpu_metrics["ane_energy"]/1000
-    #cpu_metric_dict["dram_W"] = cpu_metrics["dram_energy"]/1000
-    cpu_metric_dict["cpu_W"] = cpu_metrics["cpu_energy"]/1000
-    cpu_metric_dict["gpu_W"] = cpu_metrics["gpu_energy"]/1000
-    cpu_metric_dict["package_W"] = cpu_metrics["combined_power"]/1000
+
+    cpu_metric_dict["ane_W"] = cpu_metrics.get("ane_energy", 0) / 1000
+    cpu_metric_dict["cpu_W"] = cpu_metrics.get("cpu_energy", 0) / 1000
+    cpu_metric_dict["gpu_W"] = cpu_metrics.get("gpu_energy", 0) / 1000
+    cpu_metric_dict["package_W"] = cpu_metrics.get("combined_power", 0) / 1000
     cpu_metric_dict["cpu_available"] = cpu_metrics.get("cpu_energy_available", True)
     cpu_metric_dict["gpu_available"] = cpu_metrics.get("gpu_energy_available", True)
+    cpu_metric_dict["ane_available"] = cpu_metrics.get("ane_energy_available", True)
+    cpu_metric_dict["power_source"] = cpu_metrics.get("power_source", "")
     return cpu_metric_dict
 
 
@@ -242,6 +245,7 @@ def parse_gpu_metrics(powermetrics_parse):
     gpu_metrics_dict = {
         "freq_MHz": int(gpu_metrics["freq_hz"]),
         "active": int((1 - gpu_metrics["idle_ratio"])*100),
+        "count": int(gpu_metrics.get("count") or 1),
     }
     return gpu_metrics_dict
 
@@ -304,8 +308,9 @@ class SensorPanel(Tile):
 
 
 class DefaultView():
-    def __init__(self,soc_info_dict,args,netinfo=None):
+    def __init__(self, soc_info_dict, args, netinfo=None, capabilities=None):
         self.netinfo = netinfo
+        self.caps = capabilities or MACOS_CAPABILITIES
         self._term = None
         self.cpu_peak_power = 0
         self.gpu_peak_power = 0
@@ -319,54 +324,88 @@ class DefaultView():
         self.default_cpu_perline = 8
         self.construct(soc_info_dict,args)
         
-    def construct(self,soc_info_dict,args):
+    def construct(self, soc_info_dict, args):
         self.show_cores = bool(args.show_cores)
-        self.cpu1_gauge = HGauge(title="E-CPU Usage", val=0, color=args.color)
-        self.cpu2_gauge = HGauge(title="P-CPU Usage", val=0, color=args.color)
-        self.gpu_gauge = HGauge(title="GPU Usage", val=0, color=args.color)
-        self.ane_gauge = HGauge(title="ANE", val=0, color=args.color)
-        self.gpu_ane_gauges = [self.gpu_gauge, self.ane_gauge]
-        self.e_core_count = soc_info_dict["e_core_count"]
-        self.e_core_gauges = [VGauge(val=0, color=args.color, border_color=args.color) for _ in range(self.e_core_count)]
-        self.p_core_count = soc_info_dict["p_core_count"]
+        caps = self.caps
+        self.e_core_count = int(soc_info_dict.get("e_core_count") or 0)
+        self.p_core_count = int(soc_info_dict.get("p_core_count") or 0)
+        # A platform without E cores (most x86 desktops, ARM servers) must not
+        # show a permanently 0% "E-CPU" gauge.
+        self.has_e = (self.e_core_count > 0) and caps.e_cluster
+        self.has_gpu = caps.gpu_util
+        self.has_ane = caps.ane
+        self.power_panel = caps.power_panel
+
+        self.cpu1_gauge = (
+            HGauge(title="E-CPU Usage", val=0, color=args.color) if self.has_e else None
+        )
+        self.cpu2_gauge = HGauge(
+            title="P-CPU Usage" if self.has_e else "CPU Usage",
+            val=0,
+            color=args.color,
+        )
+        self.gpu_gauge = (
+            HGauge(title="GPU Usage", val=0, color=args.color) if self.has_gpu else None
+        )
+        self.ane_gauge = (
+            HGauge(title="ANE", val=0, color=args.color) if self.has_ane else None
+        )
+        self.gpu_ane_gauges = [
+            gauge for gauge in (self.gpu_gauge, self.ane_gauge) if gauge is not None
+        ]
+
+        self.e_core_gauges = (
+            [
+                VGauge(val=0, color=args.color, border_color=args.color)
+                for _ in range(self.e_core_count)
+            ]
+            if self.has_e
+            else []
+        )
         self.max_cpu_perline = self.default_cpu_perline
-        for i in range(int(self.default_cpu_perline/2),self.default_cpu_perline):
-            if self.p_core_count % i == 0:
-                self.max_cpu_perline = i
-                break
-        import math
-        p_core_lines = math.ceil(self.p_core_count / self.max_cpu_perline)
+        if self.p_core_count > 0:
+            for i in range(int(self.default_cpu_perline / 2), self.default_cpu_perline):
+                if self.p_core_count % i == 0:
+                    self.max_cpu_perline = i
+                    break
+        p_core_lines = (
+            math.ceil(self.p_core_count / self.max_cpu_perline)
+            if self.p_core_count
+            else 0
+        )
         self.p_core_gauges = []
         self.p_core_split = []
         for i in range(p_core_lines):
             self.p_core_gauges.append([])
-            self.p_core_gauges[i].extend([VGauge(val=0, color=args.color, border_color=args.color) for _ in range(self.max_cpu_perline if i < p_core_lines - 1 else self.p_core_count - i * self.max_cpu_perline)])
-            self.p_core_split.append(HSplit(
-                *self.p_core_gauges[i],
-            ))
+            width = (
+                self.max_cpu_perline
+                if i < p_core_lines - 1
+                else self.p_core_count - i * self.max_cpu_perline
+            )
+            self.p_core_gauges[i].extend(
+                [
+                    VGauge(val=0, color=args.color, border_color=args.color)
+                    for _ in range(width)
+                ]
+            )
+            self.p_core_split.append(HSplit(*self.p_core_gauges[i]))
+
+        self.processor_gauges = []
         if args.show_cores:
-            self.processor_gauges = [self.cpu1_gauge,
-                            HSplit(*self.e_core_gauges),
-                            self.cpu2_gauge,]
-            #for i in range(len(self.p_core_split)):
+            if self.has_e:
+                self.processor_gauges.extend([self.cpu1_gauge, HSplit(*self.e_core_gauges)])
+            self.processor_gauges.append(self.cpu2_gauge)
             self.processor_gauges.extend(self.p_core_split)
-            self.processor_gauges.extend(self.gpu_ane_gauges)
+            if self.gpu_ane_gauges:
+                self.processor_gauges.append(HSplit(*self.gpu_ane_gauges))
         else:
-            self.processor_gauges = [
-                HSplit(self.cpu1_gauge, self.cpu2_gauge),
-                HSplit(*self.gpu_ane_gauges)
-            ]
-        """
-        self.processor_gauges = [self.cpu1_gauge,
-                            HSplit(*self.e_core_gauges),
-                            self.cpu2_gauge,
-                            *self.p_core_split,
-                            *self.gpu_ane_gauges
-                            ] if args.show_cores else [
-            HSplit(self.cpu1_gauge, self.cpu2_gauge),
-            HSplit(*self.gpu_ane_gauges)
-        ]
-        """
+            if self.has_e:
+                self.processor_gauges.append(HSplit(self.cpu1_gauge, self.cpu2_gauge))
+            else:
+                self.processor_gauges.append(self.cpu2_gauge)
+            if self.gpu_ane_gauges:
+                self.processor_gauges.append(HSplit(*self.gpu_ane_gauges))
+
         self.processor_split = VSplit(
             *self.processor_gauges,
             title="Processor Utilization",
@@ -374,31 +413,10 @@ class DefaultView():
         )
 
         self.ram_gauge = HGauge(title="RAM Usage", val=0, color=args.color)
-        """
-        ecpu_bw_gauge = HGauge(title="E-CPU B/W", val=50, color=args.color)
-        pcpu_bw_gauge = HGauge(title="P-CPU B/W", val=50, color=args.color)
-        gpu_bw_gauge = HGauge(title="GPU B/W", val=50, color=args.color)
-        media_bw_gauge = HGauge(title="Media B/W", val=50, color=args.color)
-        bw_gauges = [HSplit(
-            ecpu_bw_gauge,
-            pcpu_bw_gauge,
-        ),
-            HSplit(
-                gpu_bw_gauge,
-                media_bw_gauge,
-            )] if args.show_cores else [
-            HSplit(
-                ecpu_bw_gauge,
-                pcpu_bw_gauge,
-                gpu_bw_gauge,
-                media_bw_gauge,
-            )]
-        """
         self.memory_gauges = VSplit(
             self.ram_gauge,
-            #*bw_gauges,
             border_color=args.color,
-            title="Memory"
+            title="Memory",
         )
 
         self.sensor_panel = SensorPanel(
@@ -407,19 +425,27 @@ class DefaultView():
             border_color=args.color,
         )
 
-        self.cpu_power_chart = HChart(title="CPU Power", color=args.color)
-        self.gpu_power_chart = HChart(title="GPU Power", color=args.color)
-        self.power_charts = VSplit(
-            self.cpu_power_chart,
-            self.gpu_power_chart,
-            title="Power Chart",
-            border_color=args.color,
-        ) if args.show_cores else HSplit(
-            self.cpu_power_chart,
-            self.gpu_power_chart,
-            title="Power Chart",
-            border_color=args.color,
-        )
+        self.cpu_power_chart = None
+        self.gpu_power_chart = None
+        self.power_charts = None
+        if self.power_panel:
+            self.cpu_power_chart = HChart(title="CPU Power", color=args.color)
+            self.gpu_power_chart = HChart(title="GPU Power", color=args.color)
+            self.power_charts = (
+                VSplit(
+                    self.cpu_power_chart,
+                    self.gpu_power_chart,
+                    title="Power Chart",
+                    border_color=args.color,
+                )
+                if args.show_cores
+                else HSplit(
+                    self.cpu_power_chart,
+                    self.gpu_power_chart,
+                    title="Power Chart",
+                    border_color=args.color,
+                )
+            )
 
         self.disk_read_iops_charts = HChart(title="read iops", color=args.color)
         self.disk_write_iops_charts = HChart(title="write iops", color=args.color)
@@ -428,69 +454,69 @@ class DefaultView():
         self.network_in_bps_charts = HChart(title="in Bps", color=args.color)
         self.network_out_bps_charts = HChart(title="out Bps", color=args.color)
         self.disk_io_charts = HSplit(
-            VSplit(self.disk_read_iops_charts,
-            self.disk_write_iops_charts,),
-            VSplit(self.disk_read_bps_charts,
-            self.disk_write_bps_charts,),
-            title="Disk IO", 
+            VSplit(
+                self.disk_read_iops_charts,
+                self.disk_write_iops_charts,
+            ),
+            VSplit(
+                self.disk_read_bps_charts,
+                self.disk_write_bps_charts,
+            ),
+            title="Disk IO",
             color=args.color,
-            border_color=args.color)
-        
+            border_color=args.color,
+        )
+
         self.network_io_charts = HSplit(
             self.network_in_bps_charts,
             self.network_out_bps_charts,
-            title="Network IO", 
+            title="Network IO",
             color=args.color,
-            border_color=args.color)
-        
+            border_color=args.color,
+        )
+
+        tail = []
+        if self.power_charts is not None:
+            tail.append(self.power_charts)
+        tail.extend([self.disk_io_charts, self.network_io_charts])
+
         if args.show_cores:
             self.ui = HSplit(
                 self.processor_split,
-                FillVSplit(
-                    self.memory_gauges,
-                    self.sensor_panel,
-                    self.power_charts,
-                    self.disk_io_charts,
-                    self.network_io_charts,
-                )
+                FillVSplit(self.memory_gauges, self.sensor_panel, *tail),
             )
         else:
-            # Memory and the SMC panel share a row so the default view keeps
+            # Memory and the sensor panel share a row so the default view keeps
             # the vertical space available to the charts.
             self.ui = FillVSplit(
                 self.processor_split,
                 HSplit(self.memory_gauges, self.sensor_panel),
-                self.power_charts,
-                self.disk_io_charts,
-                self.network_io_charts,
+                *tail,
             )
-        """
-        ui.title = "".join([
-            version,
-            "  (Press q or ESC to stop)"
-        ])
-        ui.border_color = args.color
-        """
         self.usage_gauges = self.ui.items[0]
-        #bw_gauges = memory_gauges.items[1]
 
-        cpu_title = "".join([
-            soc_info_dict["name"],
-            " (cores: ",
-            str(soc_info_dict["e_core_count"]),
-            "E+",
-            str(soc_info_dict["p_core_count"]),
-            "P+",
-            str(soc_info_dict["gpu_core_count"]),
-            "GPU)"
-        ])
+        cores = f"{self.e_core_count}E+" if self.e_core_count else ""
+        gpu_cores = soc_info_dict.get("gpu_core_count")
+        gpu_part = (
+            f"+{gpu_cores}GPU"
+            if gpu_cores not in (None, "", "?")
+            else ""
+        )
+        cpu_title = "".join(
+            [
+                soc_info_dict["name"],
+                " (cores: ",
+                cores,
+                str(self.p_core_count),
+                "P",
+                gpu_part,
+                ")",
+            ]
+        )
         self.usage_gauges.title = cpu_title
         self.cpu_max_power = soc_info_dict["cpu_max_power"]
         self.gpu_max_power = soc_info_dict["gpu_max_power"]
         self.ane_max_power = 16.0
-        """max_cpu_bw = soc_info_dict["cpu_max_bw"]
-        max_gpu_bw = soc_info_dict["gpu_max_bw"]
-        max_media_bw = 7.0"""
 
         self.avg_package_power_list = deque([], maxlen=max(1, int(args.avg / args.interval)))
         self.avg_cpu_power_list = deque([], maxlen=max(1, int(args.avg / args.interval)))
@@ -556,22 +582,26 @@ class DefaultView():
         if sensors is not None:
             self.sensor_panel.lines = sensors.lines()
             self.sensor_panel.levels = sensors.fan_levels()
-        if args.color != self.gpu_gauge.color:
+        if args.color != self.processor_split.border_color:
             clear_console()
-            self.gpu_gauge.color = args.color
-            self.ane_gauge.color = args.color
-            self.cpu1_gauge.color = args.color
-            self.cpu2_gauge.color = args.color
-            self.power_charts.color = args.color
-            self.power_charts.border_color = args.color
+            for gauge in (
+                self.cpu1_gauge,
+                self.cpu2_gauge,
+                self.gpu_gauge,
+                self.ane_gauge,
+            ):
+                if gauge is not None:
+                    gauge.color = args.color
+            if self.power_charts is not None:
+                self.power_charts.color = args.color
+                self.power_charts.border_color = args.color
+                self.cpu_power_chart.color = args.color
+                self.gpu_power_chart.color = args.color
             self.processor_split.border_color = args.color
             self.ram_gauge.color = args.color
             self.memory_gauges.border_color = args.color
             self.sensor_panel.color = args.color
             self.sensor_panel.border_color = args.color
-            self.cpu_power_chart.color = args.color
-            self.gpu_power_chart.color = args.color
-            #self.cpu_power_chart.border_color = args.color
             self.disk_io_charts.color = args.color
             self.disk_io_charts.border_color = args.color
             self.network_io_charts.color = args.color
@@ -589,11 +619,6 @@ class DefaultView():
                 for j in range(len(self.p_core_gauges[i])):
                     self.p_core_gauges[i][j].color = args.color
                     self.p_core_gauges[i][j].border_color = args.color
-            """
-            for i in range(len(self.p_core_gauges_ext)):
-                self.p_core_gauges_ext[i].color = args.color
-                self.p_core_gauges_ext[i].border_color = args.color
-            """
         if not update:
             self.ui.display()
             self._draw_extras(args)
@@ -618,14 +643,15 @@ class DefaultView():
                 e_cpu_usage += cpu_metrics_dict["E-Cluster" + str(i) + "_active"]
                 core_count += 1
             e_cpu_usage = (e_cpu_usage / core_count) if core_count > 0 else  0"""
-            self.cpu1_gauge.title = "".join([
-                "E-CPU Usage: ",
-                str(cpu_metrics_dict["E-Cluster_active"]),
-                "% @ ",
-                str(cpu_metrics_dict["E-Cluster_freq_Mhz"]),
-                " MHz"
-            ])
-            self.cpu1_gauge.value = cpu_metrics_dict["E-Cluster_active"]
+            if self.has_e and self.cpu1_gauge is not None:
+                self.cpu1_gauge.title = "".join([
+                    "E-CPU Usage: ",
+                    str(cpu_metrics_dict["E-Cluster_active"]),
+                    "% @ ",
+                    str(cpu_metrics_dict["E-Cluster_freq_Mhz"]),
+                    " MHz"
+                ])
+                self.cpu1_gauge.value = cpu_metrics_dict["E-Cluster_active"]
 
             """p_cpu_usage = 0
             core_count = 0
@@ -633,8 +659,9 @@ class DefaultView():
                 p_cpu_usage += cpu_metrics_dict["P-Cluster" + str(i) + "_active"]
                 core_count += 1
             p_cpu_usage = (p_cpu_usage / core_count) if core_count > 0 else  0"""
+            cluster_label = "P-CPU Usage" if self.has_e else "CPU Usage"
             self.cpu2_gauge.title = "".join([
-                "P-CPU Usage: ",
+                cluster_label + ": ",
                 str(cpu_metrics_dict["P-Cluster_active"]),
                 "% @ ",
                 str(cpu_metrics_dict["P-Cluster_freq_Mhz"]),
@@ -642,18 +669,22 @@ class DefaultView():
             ])
             self.cpu2_gauge.value = cpu_metrics_dict["P-Cluster_active"]
 
-            if args.show_cores:
-                core_count = 0
-                for i in cpu_metrics_dict["e_core"]:
-                    self.e_core_gauges[core_count % 4].title = "".join([
+            if args.show_cores and self.e_core_gauges:
+                for core_count, i in enumerate(cpu_metrics_dict["e_core"]):
+                    if core_count >= self.e_core_count:
+                        break
+                    gauge = self.e_core_gauges[core_count % len(self.e_core_gauges)]
+                    gauge.title = "".join([
                         "E" + str(i + 1) + " ",
                         str(cpu_metrics_dict["E-Cluster" + str(i) + "_active"]),
                         "%",
                     ])
-                    self.e_core_gauges[core_count % 4].value = cpu_metrics_dict["E-Cluster" + str(i) + "_active"]
-                    core_count += 1
+                    gauge.value = cpu_metrics_dict["E-Cluster" + str(i) + "_active"]
+            if args.show_cores:
                 core_count = 0
                 for i in cpu_metrics_dict["p_core"]:
+                    if core_count >= self.p_core_count:
+                        break
                     #core_gauges =self.p_core_gauges if core_count < 8 else self.p_core_gauges_ext
                     core_gauges = self.p_core_gauges[int(core_count / self.max_cpu_perline)]
                     core_gauges[core_count % self.max_cpu_perline].title = "".join([
@@ -664,28 +695,34 @@ class DefaultView():
                     core_gauges[core_count % self.max_cpu_perline].value = cpu_metrics_dict["P-Cluster" + str(i) + "_active"]
                     core_count += 1
 
-            self.gpu_gauge.title = "".join([
-                "GPU Usage: ",
-                str(gpu_metrics_dict["active"]),
-                "% @ ",
-                str(gpu_metrics_dict["freq_MHz"]),
-                " MHz"
-            ])
-            self.gpu_gauge.value = gpu_metrics_dict["active"]
+            if self.gpu_gauge is not None:
+                gpu_scope = " (own procs)" if self.caps.gpu_util_self_only else ""
+                if gpu_metrics_dict["count"] > 1:
+                    gpu_scope += " (max of {})".format(gpu_metrics_dict["count"])
+                self.gpu_gauge.title = "".join([
+                    "GPU Usage: ",
+                    str(gpu_metrics_dict["active"]),
+                    "% @ ",
+                    str(gpu_metrics_dict["freq_MHz"]),
+                    " MHz",
+                    gpu_scope,
+                ])
+                self.gpu_gauge.value = gpu_metrics_dict["active"]
 
-            ane_power_W = cpu_metrics_dict["ane_W"] / args.interval
-            if ane_power_W > self.ane_max_power:
-                self.ane_max_power = ane_power_W
-            ane_util_percent = int(
-                ane_power_W / self.ane_max_power * 100)
-            self.ane_gauge.title = "".join([
-                "ANE Usage: ",
-                str(ane_util_percent),
-                "% @ ",
-                '{0:.1f}'.format(ane_power_W),
-                " W"
-            ])
-            self.ane_gauge.value = ane_util_percent
+            if self.ane_gauge is not None:
+                ane_power_W = cpu_metrics_dict["ane_W"] / args.interval
+                if ane_power_W > self.ane_max_power:
+                    self.ane_max_power = ane_power_W
+                ane_util_percent = int(
+                    ane_power_W / self.ane_max_power * 100)
+                self.ane_gauge.title = "".join([
+                    "ANE Usage: ",
+                    str(ane_util_percent),
+                    "% @ ",
+                    '{0:.1f}'.format(ane_power_W),
+                    " W"
+                ])
+                self.ane_gauge.value = ane_util_percent
 
             ram_metrics_dict = get_ram_metrics_dict()
 
@@ -777,74 +814,80 @@ class DefaultView():
 
             cpu_available = cpu_metrics_dict["cpu_available"]
             gpu_available = cpu_metrics_dict["gpu_available"]
+            power_source = cpu_metrics_dict.get("power_source", "")
+            power_note = " (battery)" if power_source == "battery" else ""
 
-            if cpu_available or gpu_available:
-                package_power_W = cpu_metrics_dict["package_W"] / \
-                                    args.interval
-                if package_power_W > self.package_peak_power:
-                    self.package_peak_power = package_power_W
-                self.avg_package_power_list.append(package_power_W)
-                avg_package_power = get_avg(self.avg_package_power_list)
-                self.power_charts.title = "".join([
-                    "Power: ",
-                    '{0:.2f}'.format(package_power_W),
-                    "W (avg: ",
-                    '{0:.2f}'.format(avg_package_power),
-                    "W peak: ",
-                    '{0:.2f}'.format(self.package_peak_power),
-                    "W) throttle: ",
-                    thermal_throttle,
-                ])
-            else:
-                self.power_charts.title = "Power: n/a  throttle: " + thermal_throttle
+            if self.power_charts is not None:
+                if cpu_available or gpu_available:
+                    package_power_W = cpu_metrics_dict["package_W"] / \
+                                        args.interval
+                    if package_power_W > self.package_peak_power:
+                        self.package_peak_power = package_power_W
+                    self.avg_package_power_list.append(package_power_W)
+                    avg_package_power = get_avg(self.avg_package_power_list)
+                    self.power_charts.title = "".join([
+                        "Power: ",
+                        '{0:.2f}'.format(package_power_W),
+                        "W (avg: ",
+                        '{0:.2f}'.format(avg_package_power),
+                        "W peak: ",
+                        '{0:.2f}'.format(self.package_peak_power),
+                        "W) throttle: ",
+                        thermal_throttle,
+                        power_note,
+                    ])
+                else:
+                    self.power_charts.title = "Power: n/a  throttle: " + thermal_throttle
 
-            if cpu_available:
-                cpu_power_W = cpu_metrics_dict["cpu_W"] / args.interval
-                if cpu_power_W > self.cpu_peak_power:
-                    self.cpu_peak_power = cpu_power_W
-                if cpu_power_W > self.cpu_max_power:
-                    self.cpu_max_power = cpu_power_W
-                cpu_power_percent = int(
-                    cpu_power_W / self.cpu_max_power * 100)
-                self.avg_cpu_power_list.append(cpu_power_W)
-                avg_cpu_power = get_avg(self.avg_cpu_power_list)
-                self.cpu_power_chart.title = "".join([
-                    "CPU: ",
-                    '{0:.2f}'.format(cpu_power_W),
-                    "W (avg: ",
-                    '{0:.2f}'.format(avg_cpu_power),
-                    "W peak: ",
-                    '{0:.2f}'.format(self.cpu_peak_power),
-                    "W)"
-                ])
-                self.cpu_power_chart.append(cpu_power_percent)
-            else:
-                self.cpu_power_chart.title = "CPU: n/a"
-                self.cpu_power_chart.append(0)
+                if self.cpu_power_chart is not None:
+                    if cpu_available:
+                        cpu_power_W = cpu_metrics_dict["cpu_W"] / args.interval
+                        if cpu_power_W > self.cpu_peak_power:
+                            self.cpu_peak_power = cpu_power_W
+                        if cpu_power_W > self.cpu_max_power:
+                            self.cpu_max_power = cpu_power_W
+                        cpu_power_percent = int(
+                            cpu_power_W / self.cpu_max_power * 100)
+                        self.avg_cpu_power_list.append(cpu_power_W)
+                        avg_cpu_power = get_avg(self.avg_cpu_power_list)
+                        self.cpu_power_chart.title = "".join([
+                            "CPU: ",
+                            '{0:.2f}'.format(cpu_power_W),
+                            "W (avg: ",
+                            '{0:.2f}'.format(avg_cpu_power),
+                            "W peak: ",
+                            '{0:.2f}'.format(self.cpu_peak_power),
+                            "W)"
+                        ])
+                        self.cpu_power_chart.append(cpu_power_percent)
+                    else:
+                        self.cpu_power_chart.title = "CPU: n/a"
+                        self.cpu_power_chart.append(0)
 
-            if gpu_available:
-                gpu_power_W = cpu_metrics_dict["gpu_W"] / args.interval
-                if gpu_power_W > self.gpu_peak_power:
-                    self.gpu_peak_power = gpu_power_W
-                if gpu_power_W > self.gpu_max_power:
-                    self.gpu_max_power = gpu_power_W
-                gpu_power_percent = int(
-                    gpu_power_W / self.gpu_max_power * 100)
-                self.avg_gpu_power_list.append(gpu_power_W)
-                avg_gpu_power = get_avg(self.avg_gpu_power_list)
-                self.gpu_power_chart.title = "".join([
-                    "GPU: ",
-                    '{0:.2f}'.format(gpu_power_W),
-                    "W (avg: ",
-                    '{0:.2f}'.format(avg_gpu_power),
-                    "W peak: ",
-                    '{0:.2f}'.format(self.gpu_peak_power),
-                    "W)"
-                ])
-                self.gpu_power_chart.append(gpu_power_percent)
-            else:
-                self.gpu_power_chart.title = "GPU: n/a"
-                self.gpu_power_chart.append(0)
+                if self.gpu_power_chart is not None:
+                    if gpu_available:
+                        gpu_power_W = cpu_metrics_dict["gpu_W"] / args.interval
+                        if gpu_power_W > self.gpu_peak_power:
+                            self.gpu_peak_power = gpu_power_W
+                        if gpu_power_W > self.gpu_max_power:
+                            self.gpu_max_power = gpu_power_W
+                        gpu_power_percent = int(
+                            gpu_power_W / self.gpu_max_power * 100)
+                        self.avg_gpu_power_list.append(gpu_power_W)
+                        avg_gpu_power = get_avg(self.avg_gpu_power_list)
+                        self.gpu_power_chart.title = "".join([
+                            "GPU: ",
+                            '{0:.2f}'.format(gpu_power_W),
+                            "W (avg: ",
+                            '{0:.2f}'.format(avg_gpu_power),
+                            "W peak: ",
+                            '{0:.2f}'.format(self.gpu_peak_power),
+                            "W)"
+                        ])
+                        self.gpu_power_chart.append(gpu_power_percent)
+                    else:
+                        self.gpu_power_chart.title = "GPU: n/a"
+                        self.gpu_power_chart.append(0)
 
             def format_number(number):
                 return humanize.naturalsize(number)
@@ -916,10 +959,28 @@ class DefaultView():
             self.ui.display()
             self._draw_extras(args)
 
-def get_process_summary(powermetrics_parse):
+def _ram_detail_line(ram_metrics_dict, platform):
+    """Third summary line: macOS memory zones or the Linux equivalents."""
+    if platform == "linux":
+        return "cached {}G   buffers {}G   slab {}G   free {}G".format(
+            ram_metrics_dict["cached_GB"],
+            ram_metrics_dict["buffers_GB"],
+            ram_metrics_dict["slab_GB"],
+            ram_metrics_dict["phys_free_GB"],
+        )
+    return "wired {}G   active {}G   inactive {}G   free {}G".format(
+        ram_metrics_dict["wired_GB"],
+        ram_metrics_dict["active_GB"],
+        ram_metrics_dict["inactive_GB"],
+        ram_metrics_dict["phys_free_GB"],
+    )
+
+
+def get_process_summary(powermetrics_parse, capabilities=None):
     """Two top-style lines for the process view: CPU, GPU and RAM usage."""
     if not powermetrics_parse:
         return []
+    caps = capabilities or MACOS_CAPABILITIES
     cpu = parse_cpu_metrics(powermetrics_parse)
     gpu = parse_gpu_metrics(powermetrics_parse)
     ram = get_ram_metrics_dict()
@@ -941,17 +1002,20 @@ def get_process_summary(powermetrics_parse):
     detail = " ({})".format(" · ".join(parts)) if parts else ""
     first = "CPU {}%{}".format(overall, detail)
 
-    second = "GPU {}% @ {} MHz   RAM {}/{}GB ({}%)".format(
-        gpu["active"], gpu["freq_MHz"], ram["used_GB"], ram["total_GB"],
-        ram["free_percent"],
+    if caps.gpu_util:
+        gpu_text = "GPU {}% @ {} MHz".format(gpu["active"], gpu["freq_MHz"])
+        if gpu.get("count", 1) > 1:
+            gpu_text += " (max of {})".format(gpu["count"])
+    else:
+        gpu_text = "GPU n/a"
+    second = "{}   RAM {}/{}GB ({}%)".format(
+        gpu_text, ram["used_GB"], ram["total_GB"], ram["free_percent"]
     )
     if ram["swap_total_GB"] >= 0.1:
         second += "   swap {}/{}GB".format(ram["swap_used_GB"], ram["swap_total_GB"])
     else:
         second += "   swap off"
-    third = "wired {}G   active {}G   inactive {}G   free {}G".format(
-        ram["wired_GB"], ram["active_GB"], ram["inactive_GB"], ram["phys_free_GB"]
-    )
+    third = _ram_detail_line(ram, caps.platform)
     return [first, second, third]
 
 def get_avg(inlist):
@@ -962,12 +1026,14 @@ def get_avg(inlist):
 
 def begin(stdscr, sampler):
     soc_info_dict = sampler.soc
+    capabilities = getattr(sampler, "capabilities", None) or MACOS_CAPABILITIES
     sensors = SensorReader(soc_info_dict["name"])
     netinfo = NetworkInfoService(public=not args.no_public_ip)
     view1 = None
     view1_show_cores = None
     process_view = None
     network_view = None
+    gpu_view = None
     process_summary = []
     powermetrics_parse = None
     stdscr.nodelay(True)
@@ -980,11 +1046,12 @@ def begin(stdscr, sampler):
     except (AttributeError, ValueError):
         pass
     view = 2 if args.show_cores else 1
-    soc_title = "{} (cores: {}E+{}P+{}GPU)".format(
+    gpu_cores = soc_info_dict.get("gpu_core_count")
+    soc_title = "{} (cores: {}E+{}P{})".format(
         soc_info_dict["name"],
         soc_info_dict["e_core_count"],
         soc_info_dict["p_core_count"],
-        soc_info_dict["gpu_core_count"],
+        "+{}GPU".format(gpu_cores) if gpu_cores not in (None, "", "?") else "",
     )
     sampler.prime()
     interval = max(0.05, args.interval)
@@ -998,16 +1065,19 @@ def begin(stdscr, sampler):
                 powermetrics_parse = sampler.sample()
                 if view not in (3, 4):
                     sensors.read()
-                process_summary = get_process_summary(powermetrics_parse)
+                process_summary = get_process_summary(powermetrics_parse, capabilities)
                 if view == 3 and process_view is not None:
                     process_view.sample()
                 if view == 4 and network_view is not None:
                     network_view.sample()
+                if view == 5 and gpu_view is not None:
+                    gpu_view.sample()
 
             # Poll keys between samples so scrolling and view changes stay
             # responsive instead of queueing one key per refresh.
             redraw_process = tick
             redraw_network = tick
+            redraw_gpu = tick
             redraw_metrics = False
             refresh_metrics = False
 
@@ -1027,6 +1097,9 @@ def begin(stdscr, sampler):
                     elif view == 4 and network_view is not None:
                         network_view.color = args.color
                         redraw_network = True
+                    elif view == 5 and gpu_view is not None:
+                        gpu_view.color = args.color
+                        redraw_gpu = True
                     else:
                         redraw_metrics = True
                 elif key == curses.KEY_RIGHT:
@@ -1037,6 +1110,9 @@ def begin(stdscr, sampler):
                     elif view == 4 and network_view is not None:
                         network_view.color = args.color
                         redraw_network = True
+                    elif view == 5 and gpu_view is not None:
+                        gpu_view.color = args.color
+                        redraw_gpu = True
                     else:
                         redraw_metrics = True
                 elif key == curses.KEY_UP and view == 3:
@@ -1051,6 +1127,12 @@ def begin(stdscr, sampler):
                 elif key == curses.KEY_DOWN and view == 4:
                     network_view.scroll(1)
                     redraw_network = True
+                elif key == curses.KEY_UP and view == 5:
+                    gpu_view.scroll(-1)
+                    redraw_gpu = True
+                elif key == curses.KEY_DOWN and view == 5:
+                    gpu_view.scroll(1)
+                    redraw_gpu = True
                 elif chr(key).lower() == 'q':
                     print("\nStopping...")
                     running = False
@@ -1059,7 +1141,7 @@ def begin(stdscr, sampler):
                     changed = view != 1 or view1 is None or view1_show_cores != False
                     args.show_cores = False
                     if view1 is None:
-                        view1 = DefaultView(soc_info_dict=soc_info_dict, args=args, netinfo=netinfo)
+                        view1 = DefaultView(soc_info_dict=soc_info_dict, args=args, netinfo=netinfo, capabilities=capabilities)
                         view1_show_cores = False
                     elif view1_show_cores != False:
                         view1.construct(soc_info_dict, args)
@@ -1074,7 +1156,7 @@ def begin(stdscr, sampler):
                     changed = view != 2 or view1 is None or view1_show_cores != True
                     args.show_cores = True
                     if view1 is None:
-                        view1 = DefaultView(soc_info_dict=soc_info_dict, args=args, netinfo=netinfo)
+                        view1 = DefaultView(soc_info_dict=soc_info_dict, args=args, netinfo=netinfo, capabilities=capabilities)
                         view1_show_cores = True
                     elif view1_show_cores != True:
                         view1.construct(soc_info_dict, args)
@@ -1095,7 +1177,7 @@ def begin(stdscr, sampler):
                     else:
                         process_view.color = args.color
                     process_view.prime()
-                    process_summary = get_process_summary(powermetrics_parse)
+                    process_summary = get_process_summary(powermetrics_parse, capabilities)
                     view = 3
                     clear_console()
                     redraw_process = True
@@ -1110,6 +1192,20 @@ def begin(stdscr, sampler):
                     clear_console()
                     redraw_network = True
                     refresh_metrics = False
+                elif chr(key) == '5':
+                    if gpu_view is None:
+                        gpu_view = GpuView(
+                            args.color,
+                            capabilities,
+                            max(2.0, float(args.interval)),
+                        )
+                    else:
+                        gpu_view.color = args.color
+                    gpu_view.prime()
+                    view = 5
+                    clear_console()
+                    redraw_gpu = True
+                    refresh_metrics = False
                 elif key == 32 and view == 3:
                     process_view.toggle_pause()
                     redraw_process = True
@@ -1122,31 +1218,42 @@ def begin(stdscr, sampler):
                 elif chr(key).lower() == 's' and view == 4:
                     network_view.cycle_sort()
                     redraw_network = True
+                elif key == 32 and view == 5:
+                    gpu_view.toggle_pause()
+                    redraw_gpu = True
+                elif chr(key).lower() == 's' and view == 5:
+                    gpu_view.cycle_sort()
+                    redraw_gpu = True
                 elif key == 9 and view == 4:
                     network_view.cycle_focus()
                     redraw_network = True
                 elif key == 0x12:
                     # press ctrl+r to reset max and peak values
                     if view1 is not None:
-                        view1.__init__(soc_info_dict, args, netinfo=netinfo)
+                        view1.__init__(soc_info_dict, args, netinfo=netinfo, capabilities=capabilities)
                     sensors.reset_peaks()
                     if view == 3:
                         redraw_process = True
                     elif view == 4:
                         redraw_network = True
+                    elif view == 5:
+                        redraw_gpu = True
                     else:
                         refresh_metrics = True
 
             if not running:
                 break
 
-            if refresh_metrics and view not in (3, 4) and not tick:
+            if refresh_metrics and view not in (3, 4, 5) and not tick:
                 powermetrics_parse = sampler.sample()
                 sensors.read()
-                process_summary = get_process_summary(powermetrics_parse)
+                process_summary = get_process_summary(powermetrics_parse, capabilities)
                 next_tick = time.monotonic() + interval
 
-            if view == 4:
+            if view == 5:
+                if redraw_gpu:
+                    gpu_view.display(powermetrics_parse, args, sensors)
+            elif view == 4:
                 if redraw_network:
                     network_view.display(powermetrics_parse)
             elif view == 3:
@@ -1154,7 +1261,7 @@ def begin(stdscr, sampler):
                     process_view.display(process_summary)
             elif powermetrics_parse is not None:
                 if view1 is None:
-                    view1 = DefaultView(soc_info_dict=soc_info_dict, args=args, netinfo=netinfo)
+                    view1 = DefaultView(soc_info_dict=soc_info_dict, args=args, netinfo=netinfo, capabilities=capabilities)
                     view1_show_cores = args.show_cores
                     clear_console()
                 if tick or refresh_metrics:
@@ -1172,13 +1279,19 @@ def begin(stdscr, sampler):
 
 
 def main():
-    print(f"\n{version} - rootless MAC performance monitoring CLI tool for Apple Silicon")
-    print("No sudo or password required. Data source: IOReport + IOKit + psutil")
+    linux = platform_name() == "linux"
+    if linux:
+        print(f"\n{version} - performance monitoring CLI for Linux")
+        print("Data source: /proc + /sys + psutil (run as root for power, GPU and")
+        print("other users' processes; unavailable readings show as n/a)")
+    else:
+        print(f"\n{version} - rootless MAC performance monitoring CLI tool for Apple Silicon")
+        print("No sudo or password required. Data source: IOReport + IOKit + psutil")
     print("Get help at `https://github.com/visualcjy/macpm`")
     print("\n[1/3] Loading macpm\n")
-    print("\n[2/3] Starting IOReport samplers\n")
+    print("\n[2/3] Starting samplers ({})\n".format("sysfs/proc" if linux else "IOReport"))
     try:
-        sampler = Sampler(args.interval)
+        sampler = create_sampler(args.interval)
     except Exception as error:
         raise SystemExit(f"macpm: unable to start samplers: {error}")
     print("\n[3/3] Waiting for first reading...\n")

@@ -21,30 +21,44 @@ from ctypes import (
 )
 from typing import Optional
 
-IOKIT = ctypes.CDLL("/System/Library/Frameworks/IOKit.framework/IOKit")
-LIBSYSTEM = ctypes.CDLL("/usr/lib/libSystem.B.dylib")
+# The IOKit bindings are opened on first use so importing macpm on Linux never
+# dlopen's a macOS-only framework.
+IOKIT = None
+LIBSYSTEM = None
+_MACH_TASK_SELF = 0
 
-IOKIT.IOServiceMatching.argtypes = [c_char_p]
-IOKIT.IOServiceMatching.restype = c_void_p
-IOKIT.IOServiceGetMatchingServices.argtypes = [c_uint32, c_void_p, POINTER(c_uint32)]
-IOKIT.IOServiceGetMatchingServices.restype = c_uint32
-IOKIT.IOIteratorNext.argtypes = [c_uint32]
-IOKIT.IOIteratorNext.restype = c_uint32
-IOKIT.IOObjectRelease.argtypes = [c_uint32]
-IOKIT.IOServiceOpen.argtypes = [c_uint32, c_uint32, c_uint32, POINTER(c_uint32)]
-IOKIT.IOServiceOpen.restype = c_uint32
-IOKIT.IOServiceClose.argtypes = [c_uint32]
-IOKIT.IOConnectCallStructMethod.argtypes = [
-    c_uint32,
-    c_uint32,
-    c_void_p,
-    c_size_t,
-    c_void_p,
-    POINTER(c_size_t),
-]
-IOKIT.IOConnectCallStructMethod.restype = c_uint32
 
-_MACH_TASK_SELF = c_uint32.in_dll(LIBSYSTEM, "mach_task_self_").value
+def _load() -> None:
+    global IOKIT, LIBSYSTEM, _MACH_TASK_SELF
+    if IOKIT is not None:
+        return
+    iokit = ctypes.CDLL("/System/Library/Frameworks/IOKit.framework/IOKit")
+    libsystem = ctypes.CDLL("/usr/lib/libSystem.B.dylib")
+
+    iokit.IOServiceMatching.argtypes = [c_char_p]
+    iokit.IOServiceMatching.restype = c_void_p
+    iokit.IOServiceGetMatchingServices.argtypes = [c_uint32, c_void_p, POINTER(c_uint32)]
+    iokit.IOServiceGetMatchingServices.restype = c_uint32
+    iokit.IOIteratorNext.argtypes = [c_uint32]
+    iokit.IOIteratorNext.restype = c_uint32
+    iokit.IOObjectRelease.argtypes = [c_uint32]
+    iokit.IOServiceOpen.argtypes = [c_uint32, c_uint32, c_uint32, POINTER(c_uint32)]
+    iokit.IOServiceOpen.restype = c_uint32
+    iokit.IOServiceClose.argtypes = [c_uint32]
+    iokit.IOConnectCallStructMethod.argtypes = [
+        c_uint32,
+        c_uint32,
+        c_void_p,
+        c_size_t,
+        c_void_p,
+        POINTER(c_size_t),
+    ]
+    iokit.IOConnectCallStructMethod.restype = c_uint32
+
+    _MACH_TASK_SELF = c_uint32.in_dll(libsystem, "mach_task_self_").value
+    IOKIT, LIBSYSTEM = iokit, libsystem
+
+
 _KERNEL_INDEX = 2
 _READ_KEY_INFO = 9
 _READ_BYTES = 5
@@ -126,6 +140,7 @@ def _chip_family(chip: str) -> str:
 
 class SMC:
     def __init__(self):
+        _load()
         self.conn = 0
         iterator = c_uint32()
         matching = IOKIT.IOServiceMatching(b"AppleSMC")

@@ -1,13 +1,15 @@
 """Rootless network view: sockets, listeners and per-process traffic.
 
-All data comes from ``nettop`` in its CSV logging mode (``-L``).  Unlike
-``netstat`` and ``psutil.net_connections``, ``nettop`` runs unprivileged, can
-see sockets owned by other users (including root daemons) and reports
-cumulative byte counters for every process and connection.
+On macOS the data comes from ``nettop`` in its CSV logging mode (``-L``).
+Unlike ``netstat`` and ``psutil.net_connections``, ``nettop`` runs
+unprivileged, can see sockets owned by other users (including root daemons)
+and reports cumulative byte counters for every process and connection.
+``nettop``'s CSV format is not documented, so everything is parsed by column
+name and the view degrades to an error message instead of crashing.
 
-``nettop`` is a macOS system tool, but its CSV format is not documented, so
-everything is parsed by column name and the view degrades to an error message
-instead of crashing when the output changes.
+On Linux ``macpm.linux_backend.net`` provides the same interface from
+``/proc/net/*`` plus ``ss -tanie`` socket counters; this module keeps the
+platform-neutral ``NetworkView`` and the macOS sampler.
 """
 
 from __future__ import annotations
@@ -18,13 +20,21 @@ import os
 import re
 import subprocess
 import time
-from dataclasses import dataclass
 from typing import Callable, Optional
 
 from blessed import Terminal
 
 from .netinfo import NetworkInfoService, format_netinfo
-from .tui import RESET_FG, _border, _bottom, _center, _pad
+from .netmodel import (
+    ProcessTraffic,
+    SocketRow,
+    _display_addr,
+    _format_rate,
+    _port_of,
+    _split_pid,
+    _state_label,
+)
+from .tui import RESET_FG, _border, _bottom, _center, _pad, footer
 
 NETTOP = "/usr/bin/nettop"
 
@@ -35,27 +45,11 @@ _TIMEOUT = 2.0
 # ``nettop`` labels a connection row as ``tcp4 10.0.0.2:1234<->1.2.3.4:80`` and
 # a per-process summary row as ``Google Chrome H.925``.
 _CONN_RE = re.compile(r"^(tcp|udp)(4|6)\s+(\S+?)<->(\S+)$")
-_PID_RE = re.compile(r"^(.*)\.(\d+)$")
-# IPv4 uses ``host:port``; nettop prints IPv6 as ``host.port``.
-_ADDR_RE = re.compile(r"^(.*)[.:](\d+)$")
-
-_STATE_LABELS = {
-    "Established": "ESTABLISHED",
-    "Listen": "LISTEN",
-    "CloseWait": "CLOSE_WAIT",
-    "TimeWait": "TIME_WAIT",
-    "FinWait1": "FIN_WAIT_1",
-    "FinWait2": "FIN_WAIT_2",
-    "LastAck": "LAST_ACK",
-    "SynSent": "SYN_SENT",
-    "SynRecv": "SYN_RECV",
-    "Closed": "CLOSED",
-}
 
 _TRAFFIC_SORTS = ["rx", "tx", "conns", "pid", "name"]
 _LISTENER_SORTS = ["port", "process", "pid"]
-_FOOTER = " q quit  1-4 view  Tab focus  s sort  ↑/↓ scroll  Space pause  ←/→ colour "
-_FOOTER_PAUSED = " q quit  1-4 view  Tab focus  s sort  ↑/↓ scroll  Space resume  ←/→ colour "
+_FOOTER = footer("q quit  1-5 view  Tab focus  s sort  ↑/↓ scroll  Space pause  ←/→ colour")
+_FOOTER_PAUSED = footer("q quit  1-5 view  Tab focus  s sort  ↑/↓ scroll  Space resume  ←/→ colour")
 
 _SORT_LABELS = {
     "rx": "↓/s",
@@ -74,85 +68,6 @@ def _to_int(value) -> int:
     except (TypeError, ValueError):
         return 0
 
-
-def _state_label(state: str) -> str:
-    return _STATE_LABELS.get(state, state.upper())
-
-
-def _split_pid(label: str) -> tuple[Optional[int], str]:
-    match = _PID_RE.match(label)
-    if match is None:
-        return None, label
-    return int(match.group(2)), match.group(1)
-
-
-def _split_addr(addr: str) -> tuple[str, str]:
-    match = _ADDR_RE.match(addr.strip())
-    if match is None:
-        return addr.strip(), ""
-    return match.group(1), match.group(2)
-
-
-def _display_addr(addr: str) -> str:
-    """Normalise nettop's mixed IPv4/IPv6 address notation for display."""
-    host, port = _split_addr(addr)
-    if not port:
-        return addr
-    if host in ("*", "0.0.0.0", "::", "[::]"):
-        return f"*:{port}"
-    if ":" in host:
-        return f"[{host.strip('[]')}]:{port}"
-    return f"{host}:{port}"
-
-
-def _port_of(addr: str) -> int:
-    try:
-        return int(_split_addr(addr)[1])
-    except ValueError:
-        return 0
-
-
-def _format_rate(bps: float) -> str:
-    """Format a byte-per-second value as a short ``1.2M`` cell."""
-    if bps < 1:
-        return "0"
-    value = float(bps)
-    for unit in ("B", "K", "M", "G"):
-        if value < 1024 or unit == "G":
-            if unit == "B":
-                return f"{int(value)}B"
-            return f"{value:.1f}{unit}" if value < 10 else f"{value:.0f}{unit}"
-        value /= 1024
-    return "0"
-
-
-@dataclass
-class SocketRow:
-    proto: str  # "tcp" or "udp"
-    family: str  # "4" or "6"
-    local: str
-    remote: str
-    state: str  # nettop's CamelCase state, empty for UDP
-    iface: str
-    pid: Optional[int]
-    process: str
-    rx: int = 0
-    tx: int = 0
-
-    @property
-    def is_listen(self) -> bool:
-        return self.proto == "tcp" and self.state == "Listen"
-
-
-@dataclass
-class ProcessTraffic:
-    pid: int
-    name: str
-    conns: int = 0
-    rx: int = 0
-    tx: int = 0
-    rx_bps: float = 0.0
-    tx_bps: float = 0.0
 
 def _run_nettop(args: list[str]) -> Optional[str]:
     """Run nettop once and return its stdout, or None when it is unavailable."""
@@ -376,7 +291,10 @@ class NetworkView:
         self.color = color
         self.full_interval = max(2.0, float(full_interval))
         self.fast_interval = max(1.0, float(fast_interval))
-        self.sampler = sampler or NetworkSampler()
+        if sampler is None:
+            from .backend import create_network_sampler
+            sampler = create_network_sampler()
+        self.sampler = sampler
         self.netinfo = netinfo or NetworkInfoService(public=public_ip)
         self.focus = 0  # 0 = traffic, 1 = listeners
         self.traffic_sort = "rx"

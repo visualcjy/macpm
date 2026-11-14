@@ -14,8 +14,21 @@ from typing import Optional
 
 import psutil
 
-from .ioreport import Channel, Subscription
+from .metrics import (
+    ENERGY_GRACE_SAMPLES,
+    ENERGY_TO_J,
+    calc_freq,
+    energy_available,
+    energy_to_joules,
+    sane_energy,
+)
 from .soc import get_freq_tables, get_soc_info
+
+# macOS-only bindings are imported lazily in ``Sampler.__init__``: importing
+# this module on Linux must not dlopen CoreFoundation/IOReport, otherwise even
+# ``macpm --version`` fails.
+Channel = object
+
 
 def _keep_energy_channel(name: str) -> bool:
     """Only the channels macpm's power panel needs."""
@@ -26,90 +39,22 @@ def _keep_energy_channel(name: str) -> bool:
     )
 
 
-_ENERGY_TO_J = {
-    "mj": 1e-3,
-    "uj": 1e-6,
-    "µj": 1e-6,
-    "μj": 1e-6,
-    "nj": 1e-9,
-    "pj": 1e-12,
-    "j": 1.0,
-}
-
-
-def calc_freq(states: list[tuple[str, int]], freqs: list[int]) -> tuple[float, float]:
-    """Return (average active frequency in MHz, active residency ratio).
-
-    Mirrors the calculation used by other IOReport monitors: skip
-    DOWN/IDLE/OFF, weight the remaining P-states by residency, and divide
-    their residency by the total.  ``freqs`` is the DVFS table for those active states.  If the table
-    is shorter than the state list (the GPU on some chips has more P-states
-    than table entries), the last known frequency is used for the extra states.
-    """
-    if not states:
-        return 0.0, 0.0
-
-    total = sum(residency for _, residency in states)
-    if total <= 0:
-        return 0.0, 0.0
-
-    offset = None
-    for index, (name, _) in enumerate(states):
-        if name not in ("IDLE", "DOWN", "OFF"):
-            offset = index
-            break
-    if offset is None:
-        return 0.0, 0.0
-
-    active_states = states[offset:]
-    usage = sum(residency for _, residency in active_states)
-    if usage <= 0:
-        return 0.0, 0.0
-
-    if not freqs:
-        return 0.0, usage / total
-
-    last_freq = float(freqs[-1])
-    average = sum(
-        residency / usage * (freqs[i] if i < len(freqs) else last_freq)
-        for i, (_, residency) in enumerate(active_states)
-    )
-    return float(average), usage / total
-
-
-def _energy_to_joules(value: int, unit: str) -> float:
-    return max(0.0, float(value)) * _ENERGY_TO_J.get(unit.strip().lower(), 1e-3)
-
-
-_ENERGY_GRACE_SAMPLES = 3
-
-
-def _energy_available(seen: bool, samples: int) -> bool:
-    """Whether a component's Energy Model counter is reporting anything.
-
-    A counter that has never produced a non-zero delta after a few frames is
-    treated as unreadable (macOS 27 can expose it but keep it at zero without
-    root), so the UI can show ``n/a`` instead of a misleading 0 W.
-    """
-    return seen or samples <= _ENERGY_GRACE_SAMPLES
-
-
-def _sane_energy(joules: float, elapsed: float, max_power: float) -> float:
-    """Drop an energy delta that implies an impossible average power.
-
-    macOS sometimes coalesces Energy Model updates, and the counters can jump
-    after a sleep/wake.  Dividing such a delta by a single interval produces
-    thousands of watts; those samples used to stick in the peak tracker.
-    """
-    if joules <= 0:
-        return 0.0
-    if joules / max(elapsed, 1e-3) > max_power:
-        return 0.0
-    return joules
+# Backwards compatible aliases for the helpers that used to live here.
+_ENERGY_TO_J = ENERGY_TO_J
+_ENERGY_GRACE_SAMPLES = ENERGY_GRACE_SAMPLES
+_energy_to_joules = energy_to_joules
+_energy_available = energy_available
+_sane_energy = sane_energy
 
 
 class Sampler:
     def __init__(self, interval: float):
+        import sys
+
+        if sys.platform != "darwin":
+            raise RuntimeError(
+                "the macOS sampler needs IOReport; use macpm.backend.create_sampler()"
+            )
         self.interval = max(0.1, float(interval))
         self.soc = get_soc_info()
         self.e_freqs, self.p_freqs, self.gpu_freqs = get_freq_tables(self.soc["name"])
@@ -157,6 +102,8 @@ class Sampler:
 
     @staticmethod
     def _subscription(group: str, subgroup: Optional[str] = None, keep=None):
+        from .ioreport import Subscription
+
         try:
             return Subscription(group, subgroup, keep=keep)
         except Exception:

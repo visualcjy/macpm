@@ -7,7 +7,7 @@ README = (ROOT / "README.md").read_text(encoding="utf-8")
 
 setup(
     name="macpm",
-    version="2.2",
+    version="3.0",
     author="Jinyu Chen",
     author_email="visualcjy@mail.com",
     url="https://github.com/visualcjy/macpm",
@@ -16,7 +16,7 @@ setup(
         "Issues": "https://github.com/visualcjy/macpm/issues",
         "Changelog": "https://github.com/visualcjy/macpm/blob/main/CHANGELOG.md",
     },
-    description="Rootless performance monitoring CLI tool for Apple Silicon",
+    description="Performance monitoring CLI for Apple Silicon and Linux",
     long_description=README,
     long_description_content_type="text/markdown",
     license="MIT",
@@ -43,9 +43,10 @@ setup(
         "Programming Language :: Python :: 3.12",
         "Programming Language :: Python :: 3.13",
         "Operating System :: MacOS",
+        "Operating System :: POSIX :: Linux",
         "Environment :: Console",
         "Topic :: System :: Monitoring",
     ],
-    keywords="macpm apple-silicon monitor performance ioReport psutil",
+    keywords="macpm apple-silicon linux monitor performance ioReport psutil",
     zip_safe=False,
 )
