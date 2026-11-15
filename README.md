@@ -538,6 +538,14 @@ Release steps are documented in [RELEASE.md](https://github.com/visualcjy/macpm/
 - **The network header has no public IP** — the lookup is disabled with
   `--no-public-ip`, or the machine is offline / the service is blocked.  The
   local IP, prefix and gateway still show.
+- **`ModuleNotFoundError: No module named 'macpm.macpm'` after a root install**
+  — `sudo pip install` inherited a restrictive umask (e.g. `0007`), so the
+  package directories were written as `root:root 750` and a normal user cannot
+  read them; Python then treats them as namespace packages (the same happens to
+  `blessed`, which reports `cannot import name 'Terminal'`).  Reinstall with a
+  sane umask (`sudo sh -c 'umask 022; pip install --force-reinstall macpm'`),
+  install with `pip install --user`, or fix the modes (`sudo chmod -R a+rX
+  /usr/local/lib/python3.*/dist-packages/macpm*` and the dependencies).
 
 ## Changelog
 
