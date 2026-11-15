@@ -109,7 +109,9 @@ tag pushes to a GitHub release only.
 If you prefer a manual release, create one from the tag and upload
 `dist/*.whl`, `dist/*.tar.gz` and the standalone tarball.
 
-## 6. Standalone arm64 binaries (optional)
+## 6. Standalone binaries (optional)
+
+### macOS (arm64)
 
 On an Apple Silicon build machine:
 
@@ -127,6 +129,30 @@ Attach it to the GitHub release.  The binaries are ad-hoc signed, not
 notarized; see `packaging/README.txt` for the Gatekeeper note.  To notarize,
 pass `CODESIGN_ID` to the build script and submit/staple the archive with
 `notarytool`.
+
+### Linux (x86_64 / aarch64)
+
+On a Linux build host (an arm64 Ubuntu VM in OrbStack is enough: the script
+runs the x86_64 interpreter through Rosetta):
+
+```sh
+packaging/build-linux.sh both --deb
+```
+
+The first run downloads python-build-standalone (cached in
+`~/.cache/macpm-build/pbs`) and produces:
+
+```text
+dist/macpm-3.1.0-linux-x86_64.tar.gz
+dist/macpm-3.1.0-linux-aarch64.tar.gz
+dist/macpm_3.1.0_amd64.deb
+dist/macpm_3.1.0_arm64.deb
+```
+
+Both architectures keep a glibc 2.17 floor.  Building x86_64 on an arm64 host
+needs `binutils-x86-64-linux-gnu` (for `objcopy`) and the amd64 glibc
+(`dpkg --add-architecture amd64`, `libc6:amd64`).  Attach the four files to
+the release next to the macOS tarball.
 
 ## 7. Update the Homebrew tap
 

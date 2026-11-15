@@ -32,6 +32,8 @@ MANIFEST
 #  before PyInstaller builds the exe, so as to inject date/other infos into it.
 *.manifest
 *.spec
+# ...except the Linux build spec that ships with the project
+!packaging/macpm-linux.spec
 
 # Installer logs
 pip-log.txt

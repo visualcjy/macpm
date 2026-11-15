@@ -460,9 +460,13 @@ headless UI against it.
 
 ## Standalone binaries
 
-Standalone unsigned/ad-hoc arm64 binary (`macpm`) can be built with
-`packaging/build.sh` and attached to a GitHub release.  It bundles Python and
-all dependencies, so the target Mac needs no Python installation.
+`macpm` can be shipped as a self-contained binary, so the target machine needs
+no Python installation.  There are two build paths.
+
+### macOS (arm64)
+
+`packaging/build.sh`, run on an Apple Silicon Mac, produces an unsigned/ad-hoc
+arm64 `macpm` and `macpm-<version>-macos-arm64.tar.gz`.
 
 On first launch from a browser download, macOS Gatekeeper may ask you to
 right-click → Open, or you can remove the quarantine flag:
@@ -472,6 +476,32 @@ xattr -d com.apple.quarantine ./macpm ./macpm.command
 ```
 
 See [packaging/README.txt](https://github.com/visualcjy/macpm/blob/main/packaging/README.txt) for details.
+
+### Linux (x86_64 / aarch64)
+
+`packaging/build-linux.sh` builds one-file binaries and, with `--deb`, Debian
+packages:
+
+```sh
+packaging/build-linux.sh both --deb
+```
+
+Each target gets its own python-build-standalone interpreter, so the result
+does not depend on the build host's Python.  The binaries keep a glibc 2.17
+floor (CentOS 7 / Ubuntu 16.04 / Debian 9 and newer) and use the system's
+`libgcc_s`, which every glibc distribution ships.  Output:
+
+```text
+dist/macpm-<version>-linux-x86_64.tar.gz
+dist/macpm-<version>-linux-aarch64.tar.gz
+dist/macpm_<version>_amd64.deb
+dist/macpm_<version>_arm64.deb
+```
+
+Build on a native machine, or build x86_64 on an arm64 host through Rosetta
+(an OrbStack Ubuntu VM works; install `binutils-x86-64-linux-gnu` there).
+[packaging/README-linux.txt](https://github.com/visualcjy/macpm/blob/main/packaging/README-linux.txt)
+is the README that ships inside the tarball.
 
 ## Development
 
