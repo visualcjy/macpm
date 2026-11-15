@@ -1,6 +1,6 @@
 # macpm → Linux（x86_64 / arm64）移植可行性评估
 
-评估对象：macpm v3.0（本仓库，约 4.3k 行核心代码 + 1.1k 行测试）。
+评估对象：macpm v3.0.1（本仓库，约 4.3k 行核心代码 + 1.1k 行测试）。
 
 > **实现状态（2026-11-14）：已落地。** 平台抽象层（`macpm/backend.py`）、Linux 后端
 > （`macpm/linux_backend/`）与 UI 能力适配已完成，`python -m unittest discover -s tests`

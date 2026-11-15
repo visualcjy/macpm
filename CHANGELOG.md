@@ -1,5 +1,21 @@
 # Changelog
 
+## 3.0.1 — 2026-11-15
+
+### Fixed
+
+- The colour switch (`←` / `→`) crashed with
+  `AttributeError: can't set attribute 'border_color'` on dashing 0.2: that
+  release turned tile colours into read-only RGB properties.  macpm now sets
+  colours through `Tile.set_color` when it exists (translating the ANSI index
+  to RGB) and keeps the plain attributes on dashing 0.1, so both generations
+  work.
+- The applied colour is tracked internally instead of read back from
+  `border_color`; on dashing 0.2 that value is an RGB object, so the comparison
+  was always true and cleared the screen on every frame.
+- dashing 0.2 rejects ANSI index 8 in constructors; the eighth theme maps to
+  grey there instead of raising `IndexError`.
+
 ## 3.0 — 2026-11-14
 
 The Linux release.  The same package and the same TUI now run on x86_64 and

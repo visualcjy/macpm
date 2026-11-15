@@ -5,6 +5,7 @@ import os
 import time
 from collections import deque
 
+import dashing
 import humanize
 import psutil
 from blessed import Terminal
@@ -19,7 +20,57 @@ from .gpuview import GpuView
 from .sensors import SensorReader
 from .tui import RESET_FG, _bottom, _pad, footer
 
-version = 'macpm v3.0'
+version = 'macpm v3.0.1'
+
+# dashing 0.2 turned colours into RGB objects behind read-only properties and
+# added ``Tile.set_color``; 0.1 used plain attributes and integer ANSI colours.
+_DASHING_V2 = hasattr(Tile, "set_color")
+_ANSI_RGB = (
+    (0, 0, 0),
+    (255, 0, 0),
+    (0, 255, 0),
+    (255, 255, 0),
+    (0, 0, 255),
+    (255, 0, 255),
+    (0, 255, 255),
+    (255, 255, 255),
+)
+
+
+def _dash_color(value):
+    """Translate a macpm ANSI colour index for the installed dashing."""
+    if not _DASHING_V2 or not isinstance(value, int):
+        return value
+    rgb = getattr(dashing, "RGB", None)
+    if rgb is None:
+        return value
+    if 0 <= value < len(_ANSI_RGB):
+        return rgb(*_ANSI_RGB[value])
+    if value == 8:  # bright black / grey, the eighth theme
+        return rgb(128, 128, 128)
+    return value
+
+
+def _set_tile_color(tile, name, value):
+    """Set ``color``/``border_color`` on a dashing tile across versions."""
+    if tile is None:
+        return
+    setter = getattr(tile, "set_color", None)
+    if callable(setter):
+        try:
+            setter("text_color" if name == "color" else name, _dash_color(value))
+            return
+        except (TypeError, ValueError):
+            pass
+    try:
+        setattr(tile, name, value)
+    except AttributeError:
+        pass
+
+
+def _set_tile_colors(tile, value):
+    _set_tile_color(tile, "color", value)
+    _set_tile_color(tile, "border_color", value)
 _DEFAULT_FOOTER = footer("q quit  1-5 view  ←/→ colour  Ctrl+R reset peaks")
 
 
@@ -311,6 +362,7 @@ class DefaultView():
     def __init__(self, soc_info_dict, args, netinfo=None, capabilities=None):
         self.netinfo = netinfo
         self.caps = capabilities or MACOS_CAPABILITIES
+        self._applied_color = args.color
         self._term = None
         self.cpu_peak_power = 0
         self.gpu_peak_power = 0
@@ -337,18 +389,18 @@ class DefaultView():
         self.power_panel = caps.power_panel
 
         self.cpu1_gauge = (
-            HGauge(title="E-CPU Usage", val=0, color=args.color) if self.has_e else None
+            HGauge(title="E-CPU Usage", val=0, color=_dash_color(args.color)) if self.has_e else None
         )
         self.cpu2_gauge = HGauge(
             title="P-CPU Usage" if self.has_e else "CPU Usage",
             val=0,
-            color=args.color,
+            color=_dash_color(args.color),
         )
         self.gpu_gauge = (
-            HGauge(title="GPU Usage", val=0, color=args.color) if self.has_gpu else None
+            HGauge(title="GPU Usage", val=0, color=_dash_color(args.color)) if self.has_gpu else None
         )
         self.ane_gauge = (
-            HGauge(title="ANE", val=0, color=args.color) if self.has_ane else None
+            HGauge(title="ANE", val=0, color=_dash_color(args.color)) if self.has_ane else None
         )
         self.gpu_ane_gauges = [
             gauge for gauge in (self.gpu_gauge, self.ane_gauge) if gauge is not None
@@ -356,7 +408,7 @@ class DefaultView():
 
         self.e_core_gauges = (
             [
-                VGauge(val=0, color=args.color, border_color=args.color)
+                VGauge(val=0, color=_dash_color(args.color), border_color=_dash_color(args.color))
                 for _ in range(self.e_core_count)
             ]
             if self.has_e
@@ -384,7 +436,7 @@ class DefaultView():
             )
             self.p_core_gauges[i].extend(
                 [
-                    VGauge(val=0, color=args.color, border_color=args.color)
+                    VGauge(val=0, color=_dash_color(args.color), border_color=_dash_color(args.color))
                     for _ in range(width)
                 ]
             )
@@ -409,50 +461,50 @@ class DefaultView():
         self.processor_split = VSplit(
             *self.processor_gauges,
             title="Processor Utilization",
-            border_color=args.color,
+            border_color=_dash_color(args.color),
         )
 
-        self.ram_gauge = HGauge(title="RAM Usage", val=0, color=args.color)
+        self.ram_gauge = HGauge(title="RAM Usage", val=0, color=_dash_color(args.color))
         self.memory_gauges = VSplit(
             self.ram_gauge,
-            border_color=args.color,
+            border_color=_dash_color(args.color),
             title="Memory",
         )
 
         self.sensor_panel = SensorPanel(
-            color=args.color,
+            color=_dash_color(args.color),
             title="Temps & Fans",
-            border_color=args.color,
+            border_color=_dash_color(args.color),
         )
 
         self.cpu_power_chart = None
         self.gpu_power_chart = None
         self.power_charts = None
         if self.power_panel:
-            self.cpu_power_chart = HChart(title="CPU Power", color=args.color)
-            self.gpu_power_chart = HChart(title="GPU Power", color=args.color)
+            self.cpu_power_chart = HChart(title="CPU Power", color=_dash_color(args.color))
+            self.gpu_power_chart = HChart(title="GPU Power", color=_dash_color(args.color))
             self.power_charts = (
                 VSplit(
                     self.cpu_power_chart,
                     self.gpu_power_chart,
                     title="Power Chart",
-                    border_color=args.color,
+                    border_color=_dash_color(args.color),
                 )
                 if args.show_cores
                 else HSplit(
                     self.cpu_power_chart,
                     self.gpu_power_chart,
                     title="Power Chart",
-                    border_color=args.color,
+                    border_color=_dash_color(args.color),
                 )
             )
 
-        self.disk_read_iops_charts = HChart(title="read iops", color=args.color)
-        self.disk_write_iops_charts = HChart(title="write iops", color=args.color)
-        self.disk_read_bps_charts = HChart(title="read Bps", color=args.color)
-        self.disk_write_bps_charts = HChart(title="write Bps", color=args.color)
-        self.network_in_bps_charts = HChart(title="in Bps", color=args.color)
-        self.network_out_bps_charts = HChart(title="out Bps", color=args.color)
+        self.disk_read_iops_charts = HChart(title="read iops", color=_dash_color(args.color))
+        self.disk_write_iops_charts = HChart(title="write iops", color=_dash_color(args.color))
+        self.disk_read_bps_charts = HChart(title="read Bps", color=_dash_color(args.color))
+        self.disk_write_bps_charts = HChart(title="write Bps", color=_dash_color(args.color))
+        self.network_in_bps_charts = HChart(title="in Bps", color=_dash_color(args.color))
+        self.network_out_bps_charts = HChart(title="out Bps", color=_dash_color(args.color))
         self.disk_io_charts = HSplit(
             VSplit(
                 self.disk_read_iops_charts,
@@ -463,16 +515,16 @@ class DefaultView():
                 self.disk_write_bps_charts,
             ),
             title="Disk IO",
-            color=args.color,
-            border_color=args.color,
+            color=_dash_color(args.color),
+            border_color=_dash_color(args.color),
         )
 
         self.network_io_charts = HSplit(
             self.network_in_bps_charts,
             self.network_out_bps_charts,
             title="Network IO",
-            color=args.color,
-            border_color=args.color,
+            color=_dash_color(args.color),
+            border_color=_dash_color(args.color),
         )
 
         tail = []
@@ -582,7 +634,8 @@ class DefaultView():
         if sensors is not None:
             self.sensor_panel.lines = sensors.lines()
             self.sensor_panel.levels = sensors.fan_levels()
-        if args.color != self.processor_split.border_color:
+        if args.color != self._applied_color:
+            self._applied_color = args.color
             clear_console()
             for gauge in (
                 self.cpu1_gauge,
@@ -590,35 +643,28 @@ class DefaultView():
                 self.gpu_gauge,
                 self.ane_gauge,
             ):
-                if gauge is not None:
-                    gauge.color = args.color
+                _set_tile_color(gauge, "color", args.color)
             if self.power_charts is not None:
-                self.power_charts.color = args.color
-                self.power_charts.border_color = args.color
-                self.cpu_power_chart.color = args.color
-                self.gpu_power_chart.color = args.color
-            self.processor_split.border_color = args.color
-            self.ram_gauge.color = args.color
-            self.memory_gauges.border_color = args.color
-            self.sensor_panel.color = args.color
-            self.sensor_panel.border_color = args.color
-            self.disk_io_charts.color = args.color
-            self.disk_io_charts.border_color = args.color
-            self.network_io_charts.color = args.color
-            self.network_io_charts.border_color = args.color
-            self.disk_read_iops_charts.color = args.color
-            self.disk_write_iops_charts.color = args.color
-            self.disk_read_bps_charts.color = args.color
-            self.disk_write_bps_charts.color = args.color
-            self.network_in_bps_charts.color = args.color
-            self.network_out_bps_charts.color = args.color
-            for i in range(len(self.e_core_gauges)):
-                self.e_core_gauges[i].color = args.color
-                self.e_core_gauges[i].border_color = args.color
-            for i in range(len(self.p_core_gauges)):
-                for j in range(len(self.p_core_gauges[i])):
-                    self.p_core_gauges[i][j].color = args.color
-                    self.p_core_gauges[i][j].border_color = args.color
+                _set_tile_colors(self.power_charts, args.color)
+                _set_tile_color(self.cpu_power_chart, "color", args.color)
+                _set_tile_color(self.gpu_power_chart, "color", args.color)
+            _set_tile_color(self.processor_split, "border_color", args.color)
+            _set_tile_color(self.ram_gauge, "color", args.color)
+            _set_tile_color(self.memory_gauges, "border_color", args.color)
+            _set_tile_colors(self.sensor_panel, args.color)
+            _set_tile_colors(self.disk_io_charts, args.color)
+            _set_tile_colors(self.network_io_charts, args.color)
+            _set_tile_color(self.disk_read_iops_charts, "color", args.color)
+            _set_tile_color(self.disk_write_iops_charts, "color", args.color)
+            _set_tile_color(self.disk_read_bps_charts, "color", args.color)
+            _set_tile_color(self.disk_write_bps_charts, "color", args.color)
+            _set_tile_color(self.network_in_bps_charts, "color", args.color)
+            _set_tile_color(self.network_out_bps_charts, "color", args.color)
+            for gauge in self.e_core_gauges:
+                _set_tile_colors(gauge, args.color)
+            for row in self.p_core_gauges:
+                for gauge in row:
+                    _set_tile_colors(gauge, args.color)
         if not update:
             self.ui.display()
             self._draw_extras(args)
