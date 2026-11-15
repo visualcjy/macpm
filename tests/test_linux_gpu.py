@@ -3,7 +3,12 @@ import tempfile
 import unittest
 from unittest import mock
 
-from macpm.linux_backend.gpu import GpuBackend, GpuMonitor, reset_shared
+from macpm.linux_backend.gpu import (
+    GpuBackend,
+    GpuMonitor,
+    GpuSample,
+    reset_shared,
+)
 from macpm.linux_backend.proc import per_process_gpu_ns, scan_drm_clients
 from macpm.linux_backend.sysfs import SysRoot
 
@@ -282,3 +287,21 @@ class SharedBackendTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PrimaryTests(unittest.TestCase):
+    def test_zero_busy_cards_are_ranked_by_power_then_clock(self):
+        samples = [
+            GpuSample(available=True, index=0, busy_pct=0, power_w=20, freq_mhz=210),
+            GpuSample(available=True, index=3, busy_pct=0, power_w=70, freq_mhz=2520),
+        ]
+
+        self.assertEqual(GpuMonitor.primary(samples).index, 3)
+
+    def test_busy_percentage_still_wins(self):
+        samples = [
+            GpuSample(available=True, index=0, busy_pct=40, power_w=30, freq_mhz=900),
+            GpuSample(available=True, index=1, busy_pct=5, power_w=90, freq_mhz=2500),
+        ]
+
+        self.assertEqual(GpuMonitor.primary(samples).index, 0)

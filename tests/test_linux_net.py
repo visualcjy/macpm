@@ -72,6 +72,23 @@ class SsTests(unittest.TestCase):
         self.assertEqual(traffic[22222], (1200, 500))
         self.assertEqual(traffic[55555], (4000, 900))
 
+    def test_iproute2_keeps_inode_on_the_header_line(self):
+        # Ubuntu 22.04 / iproute2: ``ino:`` is on the ESTAB line, counters on
+        # the tab-indented continuation.
+        text = (
+            "State Recv-Q Send-Q Local Address:Port Peer Address:Port Process\n"
+            "ESTAB 0 0 127.0.0.1:47735 127.0.0.1:6379 timer:(keepalive,1ms,0) "
+            "ino:66012797 sk:e008 cgroup:/system.slice/aicpss.service <->\n"
+            "\t ts sack bytes_sent:348 bytes_acked:349 bytes_received:418\n"
+            "LISTEN 0 4096 0.0.0.0:55184 0.0.0.0:* ino:88149 sk:1 <->\n"
+            "\t cubic cwnd:10\n"
+        )
+
+        traffic = parse_ss_traffic(text)
+
+        self.assertEqual(traffic[66012797], (418, 349))
+        self.assertEqual(traffic[88149], (0, 0))
+
     def test_empty_output(self):
         self.assertEqual(parse_ss_traffic(""), {})
 

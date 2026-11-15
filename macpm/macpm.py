@@ -1,15 +1,25 @@
 import argparse
 import curses
+import threading
 import math
 import os
 import time
 from collections import deque
 
-import dashing
 import humanize
 import psutil
 from blessed import Terminal
-from dashing import VSplit, HSplit, HGauge, HChart, VGauge, HBrailleChart, HBrailleFilledChart, TBox, Tile
+
+from .widgets import (
+    FillVSplit,
+    HSplit,
+    HGauge,
+    HChart,
+    SensorPanel,
+    VGauge,
+    VSplit,
+    _fit_title,
+)
 
 from .netinfo import NetworkInfoService, format_netinfo
 from .network import NetworkView
@@ -20,130 +30,41 @@ from .gpuview import GpuView
 from .sensors import SensorReader
 from .tui import RESET_FG, _bottom, _pad, footer
 
-version = 'macpm v3.0.2'
+version = 'macpm v3.1.0'
 
-# dashing 0.2 turned colours into RGB objects behind read-only properties and
-# added ``Tile.set_color``; 0.1 used plain attributes and integer ANSI colours.
-_DASHING_V2 = hasattr(Tile, "set_color")
-_ANSI_RGB = (
-    (0, 0, 0),
-    (255, 0, 0),
-    (0, 255, 0),
-    (255, 255, 0),
-    (0, 0, 255),
-    (255, 0, 255),
-    (0, 255, 255),
-    (255, 255, 255),
-)
-
-
-def _dash_color(value):
-    """Translate a macpm ANSI colour index for the installed dashing."""
-    if not _DASHING_V2 or not isinstance(value, int):
-        return value
-    rgb = getattr(dashing, "RGB", None)
-    if rgb is None:
-        return value
-    if 0 <= value < len(_ANSI_RGB):
-        return rgb(*_ANSI_RGB[value])
-    if value == 8:  # bright black / grey, the eighth theme
-        return rgb(128, 128, 128)
-    return value
-
-
-def _set_tile_color(tile, name, value):
-    """Set ``color``/``border_color`` on a dashing tile across versions."""
-    if tile is None:
-        return
-    setter = getattr(tile, "set_color", None)
-    if callable(setter):
-        try:
-            setter("text_color" if name == "color" else name, _dash_color(value))
-            return
-        except (TypeError, ValueError):
-            pass
-    try:
-        setattr(tile, name, value)
-    except AttributeError:
-        pass
-
-
-def _set_tile_colors(tile, value):
-    _set_tile_color(tile, "color", value)
-    _set_tile_color(tile, "border_color", value)
 _DEFAULT_FOOTER = footer("q quit  1-5 view  ←/→ colour  Ctrl+R reset peaks")
 
 
-class FillVSplit(VSplit):
-    """VSplit that uses the rows dashing would leave blank.
+def _warm_gpu_data():
+    """Fetch GPU identity/process data in the background.
 
-    dashing gives every panel ``height // count`` rows and drops the
-    remainder.  The first panel keeps that base height (the processor box
-    relies on it for the network-info row); the remainder is spread over the
-    other panels so the footer sits directly below the last one.
+    The first switch to the GPU view otherwise waits for ``nvidia-smi info``
+    and ``processes``, which costs a few hundred milliseconds on a busy host.
     """
-
-    def _display(self, tbox, parent):
-        tbox = self._draw_borders_and_title(tbox)
-        if not self.items:
-            return
-        count = len(self.items)
-        base, extra = divmod(tbox.h, count)
-        heights = [base] * count
-        if count > 1 and extra:
-            share, remainder = divmod(extra, count - 1)
-            for index in range(1, count):
-                heights[index] += share
-                if index - 1 < remainder:
-                    heights[index] += 1
-        # dashing stores the row in the ``x`` field and the column in ``y``.
-        row = tbox.x
-        for item, height in zip(self.items, heights):
-            item._display(TBox(tbox.t, row, tbox.y, tbox.w, height), self)
-            row += height
-
-
-def _fit_title(title, width):
-    """Shorten ``title`` to ``width`` columns, ending with one ellipsis."""
-    if width <= 0:
-        return ""
-    if len(title) <= width:
-        return title
-    if width == 1:
-        return "…"
-    return title[:width - 1] + "…"
-
-
-def _draw_title(self, tbox, fill_all_width):
-    """Draw a dashing title clipped to its box instead of overrunning it.
-
-    dashing prints titles at full length.  A title wider than its box covers
-    the border and the terminal wraps it onto the next row, shifting the whole
-    frame.  Clipping keeps every panel aligned in a narrow window.
-    """
-    if not self.title:
+    if platform_name() != "linux":
         return
-    term = tbox.t
-    if self.border_color is None:
-        title = _fit_title(self.title, max(0, tbox.w))
-        print(term.move(tbox.x, tbox.y) + title
-              + " " * max(0, tbox.w - len(title)))
-        return
-    width = max(0, tbox.w - 2)
-    if width <= 0:
-        return
-    if len(self.title) <= width - 2:
-        line = " " + self.title + " "
-    elif len(self.title) <= width - 1:
-        line = " " + self.title
-    else:
-        line = _fit_title(self.title, width)
-    print(term.move(tbox.x, tbox.y + 1) + term.color(self.border_color) + line)
+
+    def run():
+        try:
+            from .linux_backend.gpu import shared_backend
+
+            monitor = shared_backend()
+            monitor.info()
+            monitor.processes()
+        except Exception:
+            pass
+
+    threading.Thread(target=run, daemon=True, name="macpm-gpu-warm").start()
 
 
-# Applies to the gauges, charts and splits imported above as well.
-Tile._draw_title = _draw_title
+def _set_tile_color(tile, name, value):
+    setattr(tile, name, value)
 
+
+def _set_tile_colors(tile, value):
+    tile.color = value
+    if getattr(tile, "border_color", None) is not None:
+        tile.border_color = value
 
 def _bool(value):
     if isinstance(value, bool):
@@ -298,6 +219,7 @@ def parse_gpu_metrics(powermetrics_parse):
         "active": int((1 - gpu_metrics["idle_ratio"])*100),
         "count": int(gpu_metrics.get("count") or 1),
     }
+    gpu_metrics_dict["cards"] = powermetrics_parse.get("gpus") or []
     return gpu_metrics_dict
 
 def parse_disk_metrics(powermetrics_parse):
@@ -318,52 +240,13 @@ def parse_network_metrics(powermetrics_parse):
     }
     return network_metrics_dict
 
-class SensorPanel(Tile):
-    """Bordered text box for SMC temperatures and fan speeds."""
-
-    def __init__(self, color=2, lines=None, levels=None, **kw):
-        super().__init__(color=color, **kw)
-        self.lines = list(lines or [])
-        self.levels = list(levels or [])
-
-    def _fan_bars(self, width):
-        half = max(0, (width - 2) // 2)
-        cells = []
-        for index in range(2):
-            if index >= len(self.levels):
-                cells.append(" " * half)
-                continue
-            label, level = self.levels[index]
-            if level is None:
-                cells.append(_fit_title(f"{label} --", half).ljust(half))
-                continue
-            level = max(0.0, min(100.0, level))
-            bar_width = max(1, half - len(label) - 1)
-            filled = int(round(bar_width * level / 100))
-            bar = "▉" * filled + "▏" * (bar_width - filled)
-            cells.append(_fit_title(f"{label} {bar}", half).ljust(half))
-        return "  ".join(cells)
-
-    def _display(self, tbox, parent):
-        tbox = self._draw_borders_and_title(tbox)
-        width = max(0, tbox.w)
-        rows = list(self.lines)
-        if self.levels and len(rows) < tbox.h:
-            rows.append(self._fan_bars(max(0, width - 1)))
-        for dx in range(tbox.h):
-            text = rows[dx] if dx < len(rows) else ""
-            text = _fit_title(text, width)
-            print(tbox.t.color(self.color)
-                  + tbox.t.move(tbox.x + dx, tbox.y)
-                  + text.ljust(width))
-
-
 class DefaultView():
     def __init__(self, soc_info_dict, args, netinfo=None, capabilities=None):
         self.netinfo = netinfo
         self.caps = capabilities or MACOS_CAPABILITIES
         self._applied_color = args.color
         self._term = None
+        self.gpu_count = int(soc_info_dict.get("gpu_count") or 1)
         self.cpu_peak_power = 0
         self.gpu_peak_power = 0
         self.package_peak_power = 0
@@ -387,28 +270,40 @@ class DefaultView():
         self.has_gpu = caps.gpu_util
         self.has_ane = caps.ane
         self.power_panel = caps.power_panel
+        # 32 cores or more: vertical gauges would need three rows each, which
+        # does not fit, so draw a compact title + bar instead of a border.
+        core_border = None if self.p_core_count > 32 else args.color
+        # Many cores cannot afford a bordered vertical gauge per row; use a
+        # horizontal bar there so no box outlines or partial-row artifacts
+        # appear on 64-core servers.
+        core_gauge = HGauge if core_border is None else VGauge
+        core_plain = core_border is None
 
         self.cpu1_gauge = (
-            HGauge(title="E-CPU Usage", val=0, color=_dash_color(args.color)) if self.has_e else None
+            HGauge(title="E-CPU Usage", val=0, color=args.color) if self.has_e else None
         )
         self.cpu2_gauge = HGauge(
             title="P-CPU Usage" if self.has_e else "CPU Usage",
             val=0,
-            color=_dash_color(args.color),
+            color=args.color,
         )
         self.gpu_gauge = (
-            HGauge(title="GPU Usage", val=0, color=_dash_color(args.color)) if self.has_gpu else None
+            HGauge(title="GPU Usage", val=0, color=args.color) if self.has_gpu else None
         )
         self.ane_gauge = (
-            HGauge(title="ANE", val=0, color=_dash_color(args.color)) if self.has_ane else None
+            HGauge(title="ANE", val=0, color=args.color) if self.has_ane else None
         )
         self.gpu_ane_gauges = [
             gauge for gauge in (self.gpu_gauge, self.ane_gauge) if gauge is not None
         ]
+        self.gpu_cards_panel = None
+        self.gpu_gauges = []
+        self.gpu_cards = []
+        self.gpu_separator = None
 
         self.e_core_gauges = (
             [
-                VGauge(val=0, color=_dash_color(args.color), border_color=_dash_color(args.color))
+                VGauge(val=0, color=args.color, border_color=core_border)
                 for _ in range(self.e_core_count)
             ]
             if self.has_e
@@ -420,6 +315,10 @@ class DefaultView():
                 if self.p_core_count % i == 0:
                     self.max_cpu_perline = i
                     break
+        if core_border is None and self.p_core_count % 8 == 0:
+            # Dense hosts: 8 cores per line keeps the core block short enough
+            # for the GPU cards to keep their three-row borders.
+            self.max_cpu_perline = 8
         p_core_lines = (
             math.ceil(self.p_core_count / self.max_cpu_perline)
             if self.p_core_count
@@ -436,11 +335,22 @@ class DefaultView():
             )
             self.p_core_gauges[i].extend(
                 [
-                    VGauge(val=0, color=_dash_color(args.color), border_color=_dash_color(args.color))
+                    core_gauge(
+                        val=0,
+                        color=args.color,
+                        border_color=core_border,
+                        plain=core_plain,
+                    )
                     for _ in range(width)
                 ]
             )
-            self.p_core_split.append(HSplit(*self.p_core_gauges[i]))
+            self.p_core_split.append(
+                HSplit(
+                    *self.p_core_gauges[i],
+                    min_height=1 if core_plain else 0,
+                    max_height=1 if core_plain else 0,
+                )
+            )
 
         self.processor_gauges = []
         if args.show_cores:
@@ -448,7 +358,41 @@ class DefaultView():
                 self.processor_gauges.extend([self.cpu1_gauge, HSplit(*self.e_core_gauges)])
             self.processor_gauges.append(self.cpu2_gauge)
             self.processor_gauges.extend(self.p_core_split)
-            if self.gpu_ane_gauges:
+            if self.has_gpu and self.gpu_count > 1:
+                self.gpu_separator = SensorPanel(
+                    color=args.color,
+                    lines=[" GPU usage  ·  3s max  ·  P-state / power"],
+                    min_height=1,
+                    max_height=1,
+                )
+                self.processor_gauges.append(self.gpu_separator)
+                self.gpu_cards = [
+                    SensorPanel(
+                        title="G{}".format(index),
+                        color=args.color,
+                        border_color=args.color,
+                        lines=[""],
+                        min_height=3,
+                        max_height=3,
+                    )
+                    for index in range(self.gpu_count)
+                ]
+                for start in range(0, len(self.gpu_cards), 2):
+                    self.processor_gauges.append(
+                        HSplit(
+                            *self.gpu_cards[start:start + 2],
+                            min_height=3,
+                            max_height=3,
+                        )
+                    )
+                if self.ane_gauge is not None:
+                    self.processor_gauges.append(self.ane_gauge)
+                if core_plain:
+                    self.cpu2_gauge.min_height = 2
+                    self.processor_gauges.append(
+                        SensorPanel(color=args.color, lines=[""], fill=True)
+                    )
+            elif self.gpu_ane_gauges:
                 self.processor_gauges.append(HSplit(*self.gpu_ane_gauges))
         else:
             if self.has_e:
@@ -461,50 +405,50 @@ class DefaultView():
         self.processor_split = VSplit(
             *self.processor_gauges,
             title="Processor Utilization",
-            border_color=_dash_color(args.color),
+                        border_color=args.color,
         )
 
-        self.ram_gauge = HGauge(title="RAM Usage", val=0, color=_dash_color(args.color))
+        self.ram_gauge = HGauge(title="RAM Usage", val=0, color=args.color)
         self.memory_gauges = VSplit(
             self.ram_gauge,
-            border_color=_dash_color(args.color),
+                        border_color=args.color,
             title="Memory",
         )
 
         self.sensor_panel = SensorPanel(
-            color=_dash_color(args.color),
+            color=args.color,
             title="Temps & Fans",
-            border_color=_dash_color(args.color),
+            border_color=args.color,
         )
 
         self.cpu_power_chart = None
         self.gpu_power_chart = None
         self.power_charts = None
         if self.power_panel:
-            self.cpu_power_chart = HChart(title="CPU Power", color=_dash_color(args.color))
-            self.gpu_power_chart = HChart(title="GPU Power", color=_dash_color(args.color))
+            self.cpu_power_chart = HChart(title="CPU Power", color=args.color)
+            self.gpu_power_chart = HChart(title="GPU Power", color=args.color)
             self.power_charts = (
                 VSplit(
                     self.cpu_power_chart,
                     self.gpu_power_chart,
                     title="Power Chart",
-                    border_color=_dash_color(args.color),
+                                        border_color=args.color,
                 )
                 if args.show_cores
                 else HSplit(
                     self.cpu_power_chart,
                     self.gpu_power_chart,
                     title="Power Chart",
-                    border_color=_dash_color(args.color),
+                                        border_color=args.color,
                 )
             )
 
-        self.disk_read_iops_charts = HChart(title="read iops", color=_dash_color(args.color))
-        self.disk_write_iops_charts = HChart(title="write iops", color=_dash_color(args.color))
-        self.disk_read_bps_charts = HChart(title="read Bps", color=_dash_color(args.color))
-        self.disk_write_bps_charts = HChart(title="write Bps", color=_dash_color(args.color))
-        self.network_in_bps_charts = HChart(title="in Bps", color=_dash_color(args.color))
-        self.network_out_bps_charts = HChart(title="out Bps", color=_dash_color(args.color))
+        self.disk_read_iops_charts = HChart(title="read iops", color=args.color)
+        self.disk_write_iops_charts = HChart(title="write iops", color=args.color)
+        self.disk_read_bps_charts = HChart(title="read Bps", color=args.color)
+        self.disk_write_bps_charts = HChart(title="write Bps", color=args.color)
+        self.network_in_bps_charts = HChart(title="in Bps", color=args.color)
+        self.network_out_bps_charts = HChart(title="out Bps", color=args.color)
         self.disk_io_charts = HSplit(
             VSplit(
                 self.disk_read_iops_charts,
@@ -515,16 +459,16 @@ class DefaultView():
                 self.disk_write_bps_charts,
             ),
             title="Disk IO",
-            color=_dash_color(args.color),
-            border_color=_dash_color(args.color),
+            color=args.color,
+                        border_color=args.color,
         )
 
         self.network_io_charts = HSplit(
             self.network_in_bps_charts,
             self.network_out_bps_charts,
             title="Network IO",
-            color=_dash_color(args.color),
-            border_color=_dash_color(args.color),
+            color=args.color,
+                        border_color=args.color,
         )
 
         tail = []
@@ -575,7 +519,7 @@ class DefaultView():
         self.avg_gpu_power_list = deque([], maxlen=max(1, int(args.avg / args.interval)))
 
     def _processor_spare_row(self, height):
-        """Row of the processor box left blank by dashing's fixed layout."""
+        """Row of the processor box left blank by the fixed split layout."""
         if self.show_cores:
             panel_height = height - 1
         else:
@@ -599,6 +543,41 @@ class DefaultView():
         items = len(getattr(self.ui, "items", ())) or 1
         return width // items
 
+    def _update_gpu_cards(self, gpu_metrics_dict):
+        """Title ``G3 P2 70W`` plus a horizontal ``▉▉▉ 48%`` mini bar."""
+        width = self._term.width if self._term is not None else 120
+        card_inner = max(8, self._processor_width(width) // 2 - 4)
+        bar_width = max(5, card_inner - 7)
+
+        def bar(value, width=bar_width):
+            value = 0.0 if value is None else max(0.0, min(100.0, value))
+            filled = int(round(width * value / 100.0))
+            return "▉" * filled + "▏" * (width - filled)
+
+        cards = gpu_metrics_dict.get("cards") or []
+        for panel, card in zip(self.gpu_cards, cards):
+            busy = card.get("busy_recent")
+            if busy is None:
+                busy = card.get("busy_pct")
+            value = 0.0 if busy is None else float(busy)
+            title = "G{}".format(int(card.get("index", 0)))
+            pstate = card.get("pstate") or ""
+            if pstate:
+                title += " " + pstate
+            power = card.get("power_w")
+            if power is not None:
+                title += " {:.0f}W".format(power)
+            panel.title = title
+            panel.lines = [" {} {:.0f}%".format(bar(value), value)]
+
+    def _render_ui(self, args):
+        term = self._term
+        if term is None:
+            term = self._term = Terminal()
+        from .blessed_engine import render_tiles
+
+        render_tiles(self.ui, term, term.color(args.color))
+
     def _draw_extras(self, args):
         term = self._term
         if term is None:
@@ -618,12 +597,15 @@ class DefaultView():
                 local, public = self.netinfo.snapshot()
                 text = format_netinfo(local, public)
             panel_width = self._processor_width(width)
-            out.append(
-                term.move(row, 2)
-                + accent
-                + _pad(text, max(0, panel_width - 4))
-                + reset
-            )
+            # In the per-core layout this row is inside the GPU panel; writing
+            # even an empty padded line would erase its first card row.
+            if not self.show_cores:
+                out.append(
+                    term.move(row, 2)
+                    + accent
+                    + _pad(text, max(0, panel_width - 4))
+                    + reset
+                )
         out.append(term.move(height - 1, 0) + accent + _bottom(width, _DEFAULT_FOOTER) + reset)
         print("".join(out), end="", flush=True)
 
@@ -666,7 +648,7 @@ class DefaultView():
                 for gauge in row:
                     _set_tile_colors(gauge, args.color)
         if not update:
-            self.ui.display()
+            self._render_ui(args)
             self._draw_extras(args)
             return
         thermal_pressure = parse_thermal_pressure(powermetrics_parse)
@@ -741,6 +723,8 @@ class DefaultView():
                     core_gauges[core_count % self.max_cpu_perline].value = cpu_metrics_dict["P-Cluster" + str(i) + "_active"]
                     core_count += 1
 
+            if self.gpu_cards:
+                self._update_gpu_cards(gpu_metrics_dict)
             if self.gpu_gauge is not None:
                 gpu_scope = " (own procs)" if self.caps.gpu_util_self_only else ""
                 if gpu_metrics_dict["count"] > 1:
@@ -1002,7 +986,7 @@ class DefaultView():
                 f" | R:{format_number(self.disk_read_bps_peak)}/s W:{format_number(self.disk_write_bps_peak)}/s)"
             ])
             self.network_io_charts.title = f"Network IO  (peak in:{format_number(self.network_in_bps_peak)}/s out:{format_number(self.network_out_bps_peak)}/s)"
-            self.ui.display()
+            self._render_ui(args)
             self._draw_extras(args)
 
 def _ram_detail_line(ram_metrics_dict, platform):
@@ -1100,8 +1084,12 @@ def begin(stdscr, sampler):
         "+{}GPU".format(gpu_cores) if gpu_cores not in (None, "", "?") else "",
     )
     sampler.prime()
+    _warm_gpu_data()
     interval = max(0.05, args.interval)
-    next_tick = time.monotonic() + interval
+    # Sample immediately: waiting one interval here made the first frame take
+    # a full extra second on top of the GPU vendor query.
+    next_tick = time.monotonic()
+    resize_until = 0.0
     running = True
     try:
         while running:
@@ -1273,6 +1261,8 @@ def begin(stdscr, sampler):
                 elif key == 9 and view == 4:
                     network_view.cycle_focus()
                     redraw_network = True
+                elif key == getattr(curses, "KEY_RESIZE", -999):
+                    resize_until = time.monotonic() + 0.35
                 elif key == 0x12:
                     # press ctrl+r to reset max and peak values
                     if view1 is not None:
@@ -1289,6 +1279,14 @@ def begin(stdscr, sampler):
 
             if not running:
                 break
+
+            if resize_until:
+                if time.monotonic() < resize_until:
+                    time.sleep(0.05)
+                    continue
+                resize_until = 0.0
+                redraw_process = redraw_network = redraw_gpu = True
+                refresh_metrics = True
 
             if refresh_metrics and view not in (3, 4, 5) and not tick:
                 powermetrics_parse = sampler.sample()
@@ -1325,12 +1323,6 @@ def begin(stdscr, sampler):
 
 
 def main():
-    if _DASHING_V2:
-        raise SystemExit(
-            "macpm needs dashing < 0.2: dashing 0.2 changed the drawing API "
-            "that macpm's custom layout relies on.\n"
-            "Fix it with: python3 -m pip install 'dashing<0.2'"
-        )
     linux = platform_name() == "linux"
     if linux:
         print(f"\n{version} - performance monitoring CLI for Linux")

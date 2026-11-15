@@ -120,11 +120,22 @@ def parse_ss_traffic(text: str) -> dict:
     for line in text.splitlines():
         if not line.strip():
             continue
-        if line[0].strip():
-            # A new socket header; the counters live on the indented lines.
+        if not line[0].isspace():
+            # A new socket header.  iproute2 puts ``ino:`` on this line (the
+            # counters follow on the indented continuation), while some
+            # versions also repeat counters here.
             flush()
             started = True
             inode, rx, tx = None, 0, 0
+            match = _INO_RE.search(line)
+            if match:
+                inode = int(match.group(1))
+            match = _ACKED_RE.search(line)
+            if match:
+                tx = int(match.group(1))
+            match = _RECEIVED_RE.search(line)
+            if match:
+                rx = int(match.group(1))
             continue
         if not started:
             continue
@@ -159,6 +170,10 @@ def _run_ss() -> Optional[str]:
 
 class LinuxNetworkSampler:
     """Same interface as ``macpm.network.NetworkSampler`` for ``NetworkView``."""
+
+    # ``ss`` only reports this user's sockets without root; the network view
+    # keeps the table and shows a "root for all" hint instead.
+    process_traffic_needs_root = os.geteuid() != 0
 
     def __init__(
         self,

@@ -1,10 +1,11 @@
 import contextlib
 import io
+import sys
 import types
 import unittest
 
-from macpm.capabilities import Capabilities
-from macpm.gpuview import GpuView, build_cards, build_details
+from macpm.capabilities import Capabilities, MACOS_CAPABILITIES
+from macpm.gpuview import GpuDetails, GpuView, build_cards, build_details
 from macpm.processes import ProcessRow
 
 
@@ -333,6 +334,23 @@ class MemoryBarTests(unittest.TestCase):
         self.assertIn("2.0G/8.0G", cell)
 
 
+class VendorSamplerTests(unittest.TestCase):
+    def test_sampler_forwards_model_and_cards(self):
+        from macpm.gpuview import _VendorProcessSampler
+
+        records = [
+            {"pid": 7, "name": "worker", "gpus": [0, 1], "card": "0-1",
+             "mem_mb": 100.0, "util_pct": None, "model": "Qwen3-32B"},
+        ]
+        sampler = _VendorProcessSampler(lambda: records)
+
+        rows = sampler.sample()
+
+        self.assertEqual(rows[0].model, "Qwen3-32B")
+        self.assertEqual(rows[0].gpu_list, [0, 1])
+        self.assertEqual(rows[0].gpu_card, "0-1")
+
+
 class ModelNameTests(unittest.TestCase):
     def rows(self):
         return [ProcessRow(111, "worker-a", "root", 0.0, 0, 0.0, gpu_card="0",
@@ -389,3 +407,65 @@ class LayoutHelpersTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CardColumnsTests(unittest.TestCase):
+    def _view(self):
+        view = GpuView.__new__(GpuView)
+        view.caps = MACOS_CAPABILITIES
+        return view
+
+    def test_wide_table_has_utilization_columns(self):
+        columns, _ = self._view()._card_layout(116)
+
+        for key in ("mem", "enc", "dec", "pstate"):
+            self.assertIn(key, columns)
+
+    def test_multi_gpu_table_hides_encode_and_decode(self):
+        columns, _ = self._view()._card_layout(116, multi=True)
+
+        self.assertNotIn("enc", columns)
+        self.assertNotIn("dec", columns)
+        self.assertIn("mem", columns)
+        self.assertIn("pstate", columns)
+
+    def test_narrow_table_drops_utilization_columns_first(self):
+        columns, _ = self._view()._card_layout(60)
+
+        for key in ("mem", "enc", "dec", "pstate"):
+            self.assertNotIn(key, columns)
+
+    def test_row_uses_three_second_maximum(self):
+        card = GpuDetails(index=3, name="RTX 4090", busy_pct=0, busy_recent=48,
+                          pstate="P2", mem_util_pct=0, enc_pct=0, dec_pct=0)
+
+        cells = self._view()._card_cells(card)
+
+        self.assertIn("↑48%", cells["busy"])
+        self.assertIn("▏", cells["busy"])
+        self.assertEqual(cells["pstate"], "P2")
+
+
+class CardLineTests(unittest.TestCase):
+    def test_gpu_cards_get_title_and_mini_bar(self):
+        _argv, sys.argv = sys.argv, ["macpm"]
+        try:
+            from macpm.macpm import DefaultView
+        finally:
+            sys.argv = _argv
+
+        view = DefaultView.__new__(DefaultView)
+        view._term = None
+        view._processor_width = lambda width: 58
+        view.gpu_cards = [
+            types.SimpleNamespace(title="", lines=[]) for _ in range(2)
+        ]
+        cards = [
+            {"index": 0, "busy_recent": 0, "pstate": "P8", "power_w": 24},
+            {"index": 3, "busy_recent": 48, "pstate": "P2", "power_w": 70},
+        ]
+
+        view._update_gpu_cards({"cards": cards})
+
+        self.assertIn("48%", view.gpu_cards[1].lines[0])
+        self.assertIn("G3 P2 70W", view.gpu_cards[1].title)

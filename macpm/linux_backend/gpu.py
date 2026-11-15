@@ -48,6 +48,11 @@ class GpuSample:
     mem_total_mb: Optional[float] = None
     temp_c: Optional[float] = None
     index: int = 0
+    busy_recent: Optional[float] = None
+    mem_util_pct: Optional[float] = None
+    enc_pct: Optional[float] = None
+    dec_pct: Optional[float] = None
+    pstate: str = ""
 
 
 def _driver_name(sys: SysRoot, card: str) -> str:
@@ -490,6 +495,10 @@ class VendorSmiBackend:
             mem_used_mb=row["mem_used"],
             mem_total_mb=row["mem_total"],
             temp_c=row["temp"],
+            mem_util_pct=row.get("mem_util"),
+            enc_pct=row.get("enc"),
+            dec_pct=row.get("dec"),
+            pstate=row.get("pstate", ""),
         )
 
     def per_process(self) -> dict:
@@ -783,6 +792,10 @@ class GpuBackend:
             mem_used_mb=row["mem_used"],
             mem_total_mb=row["mem_total"],
             temp_c=row["temp"],
+            mem_util_pct=row.get("mem_util"),
+            enc_pct=row.get("enc"),
+            dec_pct=row.get("dec"),
+            pstate=row.get("pstate", ""),
         )
 
 
@@ -835,17 +848,27 @@ def _run_smi(*args: str) -> str:
 
 _NVIDIA_QUERY = (
     "index,name,utilization.gpu,clocks.current.graphics,power.draw,"
-    "memory.used,memory.total,temperature.gpu"
+    "memory.used,memory.total,temperature.gpu,"
+    "utilization.memory,utilization.encoder,utilization.decoder,pstate"
 )
-_nvidia_cache = {"at": -1e9, "rows": [], "info": {}, "info_at": -1e9,
-                 "processes": [], "processes_at": -1e9}
+_nvidia_cache = {
+    "at": -1e9, "rows": [], "info": {}, "info_at": -1e9,
+    "processes": [], "processes_at": -1e9,
+    # compute-apps / pmon / uuid->index are refreshed on separate schedules:
+    # the process list is cheap to rebuild, the two nvidia-smi calls are not.
+    "apps": [], "apps_at": -1e9,
+    "sm": {}, "sm_at": -1e9,
+    "uuid": {}, "uuid_at": -1e9,
+}
 
 
 def reset_nvidia_cache() -> None:
     """Forget the cached ``nvidia-smi`` rows (tests, hot-plug)."""
     _nvidia_cache.update(
         {"at": -1e9, "rows": [], "info": {}, "info_at": -1e9,
-         "processes": [], "processes_at": -1e9}
+         "processes": [], "processes_at": -1e9,
+         "apps": [], "apps_at": -1e9, "sm": {}, "sm_at": -1e9,
+         "uuid": {}, "uuid_at": -1e9}
     )
 
 
@@ -919,60 +942,81 @@ def _nvidia_info() -> dict:
 
 
 def _nvidia_processes() -> list:
-    """Compute processes per card from ``nvidia-smi`` (cached for two seconds)."""
+    """Compute processes per card from ``nvidia-smi``.
+
+    The result is rebuilt every two seconds from three independently cached
+    pieces: ``compute-apps`` (4 s), ``pmon`` SM% (15 s) and the uuid -> index
+    map (60 s).  Each ``nvidia-smi`` call costs ~0.2 s on a busy host, so this
+    keeps the GPU view from stalling on every refresh.
+    """
     if not nvidia_smi_path():
         return []
     now = time.monotonic()
     if now - _nvidia_cache["processes_at"] < 2.0:
         return _nvidia_cache["processes"]
 
-    index_of_uuid = {}
-    for line in _run_smi("--query-gpu=index,uuid", "--format=csv,noheader").splitlines():
-        parts = [part.strip() for part in line.split(",")]
-        if len(parts) >= 2:
-            try:
-                index_of_uuid[parts[1]] = int(parts[0])
-            except ValueError:
-                pass
+    if now - _nvidia_cache["uuid_at"] >= 60.0:
+        index_of_uuid = {}
+        text = _run_smi("--query-gpu=index,uuid", "--format=csv,noheader")
+        for line in text.splitlines():
+            parts = [part.strip() for part in line.split(",")]
+            if len(parts) >= 2:
+                try:
+                    index_of_uuid[parts[1]] = int(parts[0])
+                except ValueError:
+                    pass
+        _nvidia_cache["uuid"] = index_of_uuid
+        _nvidia_cache["uuid_at"] = now
+    index_of_uuid = _nvidia_cache["uuid"]
 
-    sm_by_pid = {}
-    pmon = _run_smi("pmon", "-c", "1")
-    for line in pmon.splitlines():
-        if line.lstrip().startswith("#") or not line.strip():
-            continue
-        fields = line.split()
-        if len(fields) < 3:
-            continue
-        try:
-            pid = int(fields[1])
-        except ValueError:
-            continue
-        percent = _number(fields[3]) if len(fields) > 3 else None
-        if percent is not None:
-            sm_by_pid[pid] = percent
+    if now - _nvidia_cache["sm_at"] >= 15.0:
+        sm_by_pid = {}
+        pmon = _run_smi("pmon", "-c", "1")
+        for line in pmon.splitlines():
+            if line.lstrip().startswith("#") or not line.strip():
+                continue
+            fields = line.split()
+            if len(fields) < 3:
+                continue
+            try:
+                pid = int(fields[1])
+            except ValueError:
+                continue
+            percent = _number(fields[3]) if len(fields) > 3 else None
+            if percent is not None:
+                sm_by_pid[pid] = percent
+        _nvidia_cache["sm"] = sm_by_pid
+        _nvidia_cache["sm_at"] = now
+    sm_by_pid = _nvidia_cache["sm"]
+
+    if now - _nvidia_cache["apps_at"] >= 4.0:
+        apps = []
+        text = _run_smi(
+            "--query-compute-apps=pid,process_name,used_memory,gpu_uuid",
+            "--format=csv,noheader",
+        )
+        for line in text.splitlines():
+            parts = [part.strip() for part in line.split(",")]
+            if len(parts) < 4:
+                continue
+            try:
+                pid = int(parts[0])
+            except ValueError:
+                continue
+            apps.append((pid, parts[1] or str(pid), _number(parts[2]), parts[3]))
+        _nvidia_cache["apps"] = apps
+        _nvidia_cache["apps_at"] = now
 
     records = []
-    apps = _run_smi(
-        "--query-compute-apps=pid,process_name,used_memory,gpu_uuid",
-        "--format=csv,noheader",
-    )
-    for line in apps.splitlines():
-        parts = [part.strip() for part in line.split(",")]
-        if len(parts) < 4:
-            continue
-        try:
-            pid = int(parts[0])
-        except ValueError:
-            continue
-        gpu = index_of_uuid.get(parts[3])
+    for pid, name, mem_mb, uuid in _nvidia_cache["apps"]:
         records.append(
             {
                 "tool": "nvidia",
-                "gpu": gpu,
+                "gpu": index_of_uuid.get(uuid),
                 "pid": pid,
-                "name": parts[1] or str(pid),
+                "name": name,
                 "util_pct": sm_by_pid.get(pid),
-                "mem_mb": _number(parts[2]),
+                "mem_mb": mem_mb,
                 "mem_pct": None,
             }
         )
@@ -980,11 +1024,10 @@ def _nvidia_processes() -> list:
     _nvidia_cache["processes_at"] = now
     return records
 
-
 def _nvidia_rows(sys: SysRoot) -> list:
-    """One ``nvidia-smi`` call for every card, cached for two seconds."""
+    """One ``nvidia-smi`` call for every card, cached for one second."""
     now = time.monotonic()
-    if _nvidia_cache["rows"] and now - _nvidia_cache["at"] < 2.0:
+    if _nvidia_cache["rows"] and now - _nvidia_cache["at"] < 1.0:
         return _nvidia_cache["rows"]
     text = _run_smi(f"--query-gpu={_NVIDIA_QUERY}", "--format=csv,noheader,nounits")
     rows = []
@@ -994,6 +1037,8 @@ def _nvidia_rows(sys: SysRoot) -> list:
             continue
 
         def number(index: int):
+            if index >= len(parts):
+                return None
             try:
                 return float(parts[index])
             except (TypeError, ValueError):
@@ -1013,6 +1058,10 @@ def _nvidia_rows(sys: SysRoot) -> list:
                 "mem_used": number(5),
                 "mem_total": number(6),
                 "temp": number(7),
+                "mem_util": number(8),
+                "enc": number(9),
+                "dec": number(10),
+                "pstate": parts[11].strip() if len(parts) > 11 else "",
             }
         )
     _nvidia_cache["at"] = now
@@ -1206,6 +1255,9 @@ class GpuMonitor:
     def __init__(self, sysroot: Optional[SysRoot], backends: list):
         self.sys = sysroot or SysRoot()
         self.backends = list(backends)
+        # Rolling window for the "3s max" figure: bursty workloads often read
+        # 0% at the instant nvidia-smi is queried while the card is still hot.
+        self._busy_history: dict = {}
 
     @classmethod
     def detect(cls, sysroot: Optional[SysRoot] = None) -> "GpuMonitor":
@@ -1355,22 +1407,39 @@ class GpuMonitor:
             1 for backend in self.backends if backend.driver in ("i915", "xe")
         )
         samples = []
+        now = time.monotonic()
         for position, backend in enumerate(self.backends):
             sample = backend.sample(elapsed)
             sample.index = position
             if backend.driver in ("i915", "xe") and intel_count > 1:
                 sample.busy_pct = None
             samples.append(sample)
+        for sample in samples:
+            if sample.busy_pct is None:
+                continue
+            history = self._busy_history.setdefault(sample.index, [])
+            history.append((now, sample.busy_pct))
+            while history and now - history[0][0] > 3.0:
+                history.pop(0)
+            sample.busy_recent = max(value for _, value in history)
         return samples
 
     @staticmethod
     def primary(samples: list) -> GpuSample:
+        """The card the one-number view should describe.
+
+        Busy percentage decides first.  Bursty workloads often read 0% on
+        every card while one or two are still at a high clock, so power and
+        then frequency break the tie instead of picking the first card.
+        """
         best = None
-        best_score = -2.0
+        best_score = None
         for sample in samples:
-            score = -2.0 if not sample.available else (
-                -1.0 if sample.busy_pct is None else sample.busy_pct
-            )
+            if not sample.available:
+                score = (-2.0, -2.0, -2.0)
+            else:
+                busy = -1.0 if sample.busy_pct is None else sample.busy_pct
+                score = (busy, sample.power_w or 0.0, sample.freq_mhz or 0.0)
             if best is None or score > best_score:
                 best, best_score = sample, score
         return best or GpuSample(available=False)

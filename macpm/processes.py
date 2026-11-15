@@ -131,10 +131,48 @@ class ProcessRow:
     gpu_list: Optional[list] = None
 
 
+_CLK_TCK = os.sysconf("SC_CLK_TCK") if hasattr(os, "sysconf") else 100
+_PAGE_SIZE = os.sysconf("SC_PAGE_SIZE") if hasattr(os, "sysconf") else 4096
+
+
+def _argv_name(raw: bytes) -> str:
+    """Process name from ``/proc/<pid>/cmdline``: argv[0] without its path."""
+    if not raw:
+        return ""
+    first = raw.split(b"\0", 1)[0].decode("utf-8", "replace").strip()
+    return first.rsplit("/", 1)[-1]
+
+
+def _parse_proc_stat(raw: bytes):
+    """``(comm, starttime, cpu_ticks)`` from one ``/proc/<pid>/stat`` line.
+
+    The comm field is wrapped in parentheses and may itself contain spaces or
+    parentheses, so everything is split after the last ``)``.
+    """
+    close = raw.rfind(b")")
+    open_paren = raw.find(b"(")
+    if close <= open_paren:
+        return None
+    comm = raw[open_paren + 1:close].decode("utf-8", "replace")
+    tail = raw[close + 2:].split()
+    if len(tail) < 22:
+        return None
+    try:
+        utime = int(tail[11])
+        stime = int(tail[12])
+        starttime = int(tail[19])
+    except ValueError:
+        return None
+    return comm, starttime, utime + stime
+
+
 class ProcessSampler:
     """CPU/memory/GPU rates from two process snapshots."""
 
     ATTRS = ["pid", "name", "uids", "cpu_times", "memory_info", "create_time"]
+    # Only the busiest processes are built into rows; scanning 1000+ /proc
+    # entries for names and memory was the slow part of the process view.
+    LIMIT = 60
 
     def __init__(self):
         self._prev_cpu: dict[tuple[int, float], float] = {}
@@ -178,6 +216,8 @@ class ProcessSampler:
         self._prev_time = None
 
     def sample(self) -> list[ProcessRow]:
+        if platform_name() == "linux":
+            return self._sample_linux()
         now = time.monotonic()
         elapsed = now - self._prev_time if self._prev_time is not None else 0.0
         gpu_times = self._gpu_times()
@@ -294,6 +334,91 @@ class ProcessSampler:
         return rows
 
 
+    def _sample_linux(self) -> list[ProcessRow]:
+        """Rank every PID by CPU ticks from /proc, then read only the top ones."""
+        now = time.monotonic()
+        elapsed = now - self._prev_time if self._prev_time is not None else 0.0
+        gpu_times = self._gpu_times() if self.gpu_available else None
+        self.error = None
+        max_cpu = 100.0 * self._cpu_count
+
+        candidates = []
+        prev_cpu = {}
+        try:
+            for entry in os.listdir("/proc"):
+                if not entry.isdigit():
+                    continue
+                pid = int(entry)
+                try:
+                    with open(f"/proc/{pid}/stat", "rb") as handle:
+                        raw = handle.read()
+                except OSError:
+                    continue
+                parsed = _parse_proc_stat(raw)
+                if parsed is None:
+                    continue
+                name, starttime, ticks = parsed
+                key = (pid, starttime)
+                previous = self._prev_cpu.get(key)
+                if previous is not None and elapsed > 0:
+                    cpu_pct = max(
+                        0.0, min(max_cpu, (ticks - previous) / _CLK_TCK / elapsed * 100)
+                    )
+                else:
+                    cpu_pct = 0.0
+                prev_cpu[key] = ticks
+                candidates.append((cpu_pct, pid, name))
+        except Exception as error:
+            self.error = str(error)
+
+        candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        rows = []
+        for cpu_pct, pid, name in candidates[:self.LIMIT]:
+            try:
+                with open(f"/proc/{pid}/cmdline", "rb") as handle:
+                    name = _argv_name(handle.read()) or name
+            except OSError:
+                pass
+            mem_bytes = 0
+            try:
+                with open(f"/proc/{pid}/statm", "r", encoding="ascii") as handle:
+                    mem_bytes = int(handle.read().split()[1]) * _PAGE_SIZE
+            except (OSError, IndexError, ValueError):
+                pass
+            uid = None
+            try:
+                uid = os.stat(f"/proc/{pid}").st_uid
+            except OSError:
+                pass
+            gpu_pct = 0.0
+            if gpu_times is not None and elapsed > 0:
+                current_gpu = gpu_times.get(pid)
+                previous_gpu = self._prev_gpu.get(pid)
+                if (
+                    current_gpu is not None
+                    and previous_gpu is not None
+                    and current_gpu >= previous_gpu
+                ):
+                    gpu_pct = min(
+                        100.0, (current_gpu - previous_gpu) / elapsed / 1e9 * 100
+                    )
+            rows.append(
+                ProcessRow(
+                    pid=pid,
+                    name="macpm" if pid == os.getpid() else (name or ""),
+                    user=self._username(uid),
+                    cpu_pct=cpu_pct,
+                    mem_bytes=mem_bytes,
+                    gpu_pct=gpu_pct,
+                )
+            )
+
+        self._prev_cpu = prev_cpu
+        self._prev_gpu = gpu_times or {}
+        self._prev_time = now
+        return rows
+
+
 # -- full-screen process table -------------------------------------------
 
 _HEADERS = {
@@ -304,7 +429,7 @@ _HEADERS = {
     "mem": "MEM",
     "gpu": "GPU%",
 }
-_WIDTHS = {"pid": 6, "user": 10, "cpu": 7, "mem": 7, "gpu": 6}
+_WIDTHS = {"pid": 7, "user": 10, "cpu": 7, "mem": 7, "gpu": 6}
 _NUMERIC = {"pid", "cpu", "mem", "gpu"}
 _SORT_CYCLE = ["cpu", "mem", "gpu", "pid", "name", "user"]
 _FOOTER = footer("q quit  1-5 view  s sort  ↑/↓ scroll  Space pause  ←/→ colour")

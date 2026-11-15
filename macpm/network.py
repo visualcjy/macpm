@@ -296,6 +296,10 @@ class NetworkView:
             sampler = create_network_sampler()
         self.sampler = sampler
         self.netinfo = netinfo or NetworkInfoService(public=public_ip)
+        # The Linux sampler only sees this user's sockets without root.
+        self.traffic_needs_root = getattr(
+            sampler, "process_traffic_needs_root", False
+        )
         self.focus = 0  # 0 = traffic, 1 = listeners
         self.traffic_sort = "rx"
         self.traffic_desc = True
@@ -397,7 +401,19 @@ class NetworkView:
             "process": lambda row: (row.process.lower(), _port_of(row.local)),
             "pid": lambda row: (row.pid or 0, _port_of(row.local)),
         }[self.listener_sort]
-        return sorted(self.sampler.listeners, key=key, reverse=self.listener_desc)
+        # The same port is reported once per address family (IPv4 wildcard and
+        # IPv6 wildcard both display as "*:22"); keep one row per process.
+        seen = set()
+        rows = []
+        for row in sorted(self.sampler.listeners, key=key, reverse=self.listener_desc):
+            # Compare the displayed address: ``0.0.0.0:22`` and ``:::22``
+            # both render as ``*:22``.
+            identity = (_display_addr(row.local), row.pid, row.process)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            rows.append(row)
+        return rows
 
     # -- layout ------------------------------------------------------------
 
@@ -433,7 +449,9 @@ class NetworkView:
         return traffic, None
 
     def _traffic_widths(self, inner: int) -> tuple[int, int, int, int]:
-        pid_w, conn_w, rate_w = 6, 4, 7
+        # Linux PIDs can be 7 digits and rates reach "1023G"; the old 6/7 wide
+        # cells let a long row overflow and clipped the last column.
+        pid_w, conn_w, rate_w = 7, 5, 8
         spaces = 4
         process_w = inner - (pid_w + conn_w + 2 * rate_w + spaces)
         if process_w < 8:
@@ -446,8 +464,8 @@ class NetworkView:
         return pid_w, max(4, process_w), conn_w, rate_w
 
     def _listener_widths(self, inner: int) -> tuple[int, int, int]:
-        addr_w = min(26, max(12, inner - 22))
-        pid_w = 6
+        pid_w = 7
+        addr_w = min(26, max(12, inner - pid_w - 15))
         process_w = max(6, inner - addr_w - pid_w - 2)
         return addr_w, pid_w, process_w
 
@@ -519,9 +537,10 @@ class NetworkView:
 
     def _traffic_title(self, rows: list[ProcessTraffic]) -> str:
         arrow = "↓" if self.traffic_desc else "↑"
+        hint = " · root/sudo for all" if self.traffic_needs_root else ""
         return (
             f"traffic by process {len(rows)} · "
-            f"{_SORT_LABELS[self.traffic_sort]} {arrow}"
+            f"{_SORT_LABELS[self.traffic_sort]} {arrow}{hint}"
         )
 
     def _listener_title(self, rows: list[SocketRow]) -> str:
@@ -614,6 +633,9 @@ class NetworkView:
         traffic_texts = [
             self._traffic_text(row, traffic_widths) for row in traffic_rows
         ]
+        placeholder = "" if self.ready else (self.sampler.error or "collecting…")
+        if self.ready and not traffic_rows and self.traffic_needs_root:
+            placeholder = "no sockets visible — run with sudo to see all"
         traffic_lines = self._pane(
             traffic_geom[2],
             traffic_geom[3],
@@ -622,7 +644,7 @@ class NetworkView:
             self._traffic_header(traffic_widths),
             traffic_texts,
             self.offsets[0],
-            placeholder="" if self.ready else (self.sampler.error or "collecting…"),
+            placeholder=placeholder,
             right_title=self._range_title(0, len(traffic_rows), traffic_geom[3] - 3),
         )
 

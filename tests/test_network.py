@@ -283,6 +283,16 @@ class ViewTests(unittest.TestCase):
             self.assertEqual(total, inner)
             self.assertGreaterEqual(process_w, 4)
 
+    def test_seven_digit_pids_do_not_overflow_the_row(self):
+        view = make_view()
+        widths = view._traffic_widths(76)
+        row = ProcessTraffic(1190783, "kube-apiserver", rx_bps=10**9, tx_bps=10**9,
+                             conns=135)
+
+        text = view._traffic_text(row, widths)
+
+        self.assertLessEqual(_text_width(text), 76)
+
     def test_listener_columns_fill_the_panel(self):
         view = make_view()
 
@@ -321,6 +331,19 @@ class ViewTests(unittest.TestCase):
 
         view.cycle_sort()
         self.assertEqual(view.traffic_sort, "tx")
+
+    def test_duplicate_wildcard_listeners_are_merged(self):
+        view = make_view()
+        view.sampler.listeners = [
+            SocketRow("tcp", "4", "0.0.0.0:22", "0.0.0.0:0", "Listen", "", 2218, "sshd"),
+            SocketRow("tcp", "6", ":::22", ":::0", "Listen", "", 2218, "sshd"),
+            SocketRow("tcp", "4", "0.0.0.0:80", "0.0.0.0:0", "Listen", "", 1, "nginx"),
+        ]
+
+        rows = view._listener_rows()
+
+        self.assertEqual(len(rows), 2)
+        self.assertEqual({row.process for row in rows}, {"sshd", "nginx"})
 
     def test_listener_sort_by_port(self):
         view = make_view()

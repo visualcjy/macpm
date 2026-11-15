@@ -1,5 +1,45 @@
 # Changelog
 
+## 3.1.0 — 2026-11-15
+
+### Changed
+
+- Views 1 and 2 are painted by blessed, sharing the ANSI palette and border
+  helpers of views 3-5.  dashing (and the 0.1/0.2 compatibility layer around
+  it) is gone: the layout tree lives in `macpm/widgets.py` and
+  `macpm/blessed_engine.py` paints it.  `install_requires` now lists
+  `blessed>=1.20` explicitly.
+- The Linux process view ranks `/proc/<pid>/stat` by CPU ticks and builds rows
+  only for the busiest 60 processes; names come from `cmdline` argv[0] and the
+  PID column fits seven digits.
+
+### Added
+
+- View 2 shows a "GPU usage" hint and one bordered mini gauge per GPU on
+  multi-GPU hosts (two per line), with a horizontal bar, `G3 48% P2 70W` and
+  the same rolling three-second maximum as the GPU view.
+- The GPU view gained `MEM`/`P` (P-state) columns and shows the rolling
+  three-second maximum next to the instantaneous bar (`0% ↑48%`).  `ENC`/`DEC`
+  are only shown on single-GPU hosts.
+- Linux view 4 keeps the per-process traffic table (`ss -tanie`, TCP only) and
+  adds a "root/sudo for all" hint when running without root; listeners are
+  deduplicated by displayed address (`*:22` once).
+- The first sample runs immediately instead of waiting one refresh interval;
+  GPU identity/process data is warmed in the background.
+
+### Fixed
+
+- Charts scroll in from the right edge (newest sample on the right) and the
+  painter clears stale cells, so shrinking bars no longer leave a horizontal
+  streak.
+- GPU model names and multi-card ownership: `_VendorProcessSampler` forwards
+  `model` and `gpus` to `ProcessRow`.
+- Linux `ss` parsing reads `ino:` from the socket header line (iproute2), so
+  per-process traffic is no longer empty even as root.
+- Wide PIDs and listener duplicates no longer break the network table.
+- Resizing the terminal debounces for 0.35s and then redraws fully; the
+  startup "collecting" text is gone.
+
 ## 3.0.2 — 2026-11-15
 
 ### Fixed

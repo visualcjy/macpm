@@ -84,8 +84,9 @@ class LinuxSampler:
         self.interval = max(0.1, float(interval))
         self.sys = SysRoot()
         self.cpu = CpuSampler(self.sys)
-        self.soc = get_soc_info(self.sys, self.cpu)
         self.gpu = shared_backend(self.sys)
+        self.soc = get_soc_info(self.sys, self.cpu)
+        self.soc["gpu_count"] = self.gpu.count
         self.energy = EnergySampler(self.sys)
         self.pressure = ThermalPressure(self.sys)
         self.thermal = ThermalReader(self.sys)
@@ -280,6 +281,11 @@ def _gpu_payload(sample) -> dict:
         "mem_used_mb": sample.mem_used_mb,
         "mem_total_mb": sample.mem_total_mb,
         "temp_c": sample.temp_c,
+        "busy_recent": sample.busy_recent,
+        "mem_util_pct": sample.mem_util_pct,
+        "enc_pct": sample.enc_pct,
+        "dec_pct": sample.dec_pct,
+        "pstate": sample.pstate,
     }
 
 

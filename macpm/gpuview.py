@@ -44,15 +44,19 @@ _FOOTER_PAUSED = footer("q quit  1-5 view  s sort  ↑/↓ page  Space resume  �
 # space; the trailing columns are dropped as the terminal narrows.
 _CARD_COLUMNS = (
     ("idx", "#", 3),
-    ("busy", "BUSY", 11),
+    ("busy", "BUSY", 18),
     ("clock", "CLOCK", 9),
     ("power", "POWER", 7),
     ("vram", "VRAM", 22),
     ("temp", "TEMP", 5),
+    ("mem", "MEM", 4),
+    ("enc", "ENC", 4),
+    ("dec", "DEC", 4),
+    ("pstate", "P", 3),
 )
 _CARD_HEADERS = {key: header for key, header, _ in _CARD_COLUMNS}
 _CARD_HEADERS["name"] = "NAME"
-_CARD_MIN_NAME = 10
+_CARD_MIN_NAME = 18
 
 
 @dataclass
@@ -67,6 +71,11 @@ class GpuDetails:
     mem_used_mb: Optional[float] = None
     mem_total_mb: Optional[float] = None
     temp_c: Optional[float] = None
+    busy_recent: Optional[float] = None
+    mem_util_pct: Optional[float] = None
+    enc_pct: Optional[float] = None
+    dec_pct: Optional[float] = None
+    pstate: str = ""
     note: str = ""
 
     @property
@@ -128,6 +137,11 @@ def _details(
         mem_used_mb=_as_float(gpu.get("mem_used_mb")),
         mem_total_mb=_as_float(gpu.get("mem_total_mb")),
         temp_c=temperature,
+        busy_recent=_as_float(gpu.get("busy_recent")),
+        mem_util_pct=_as_float(gpu.get("mem_util_pct")),
+        enc_pct=_as_float(gpu.get("enc_pct")),
+        dec_pct=_as_float(gpu.get("dec_pct")),
+        pstate=str(gpu.get("pstate") or ""),
         note=note,
     )
 
@@ -248,6 +262,8 @@ class _VendorProcessSampler:
                     gpu_card=record.get("card"),
                     gpu_mem_mb=mem_mb,
                     util_known=util is not None,
+                    model=record.get("model") or None,
+                    gpu_list=record.get("gpus") or None,
                 )
             )
         return rows
@@ -365,10 +381,17 @@ class GpuView:
 
     # -- card table --------------------------------------------------------
 
-    def _card_layout(self, inner: int) -> tuple:
+    def _card_layout(self, inner: int, multi: bool = False) -> tuple:
         widths = {key: width for key, _, width in _CARD_COLUMNS}
-        columns = ["idx", "name", "busy", "clock", "power", "vram", "temp"]
-        for key in ("temp", "vram", "clock", "power", "busy"):
+        columns = ["idx", "name", "busy", "clock", "power", "vram", "temp",
+                   "mem", "enc", "dec", "pstate"]
+        if multi:
+            # Encode/decode engines only make sense when a single card is the
+            # whole story; on an 8-GPU host they are just noise.
+            columns.remove("enc")
+            columns.remove("dec")
+        for key in ("pstate", "dec", "enc", "mem", "temp", "vram", "clock",
+                    "power", "busy"):
             fixed = sum(widths[column] for column in columns if column != "name")
             fixed += len(columns) - 1
             if inner - fixed >= _CARD_MIN_NAME:
@@ -387,9 +410,11 @@ class GpuView:
 
     def _card_cells(self, card: GpuDetails) -> dict:
         if card.busy_pct is None:
-            busy = _pad("n/a", 11, right=True)
+            busy = _pad("n/a", 18, right=True)
         else:
             busy = _bar(card.busy_pct, 6) + f" {card.busy_pct:>3.0f}%"
+            if card.busy_recent is not None and card.busy_recent > card.busy_pct + 1:
+                busy += f" \N{UPWARDS ARROW}{card.busy_recent:.0f}%"
         if card.freq_mhz is None:
             clock = "n/a"
         elif card.max_freq_mhz:
@@ -405,14 +430,21 @@ class GpuView:
             vram = "unified"
         else:
             vram = "n/a"
+        def pct(value):
+            return "n/a" if value is None else f"{value:.0f}%"
+
         return {
             "idx": str(card.index),
-            "name": card.name,
+            "name": card.name[len("NVIDIA "):] if card.name.startswith("NVIDIA ") else card.name,
             "busy": busy,
             "clock": clock,
             "power": "n/a" if card.power_w is None else f"{card.power_w:.1f}W",
             "vram": vram,
             "temp": "n/a" if card.temp_c is None else f"{card.temp_c:.0f}\N{DEGREE SIGN}C",
+            "mem": pct(card.mem_util_pct),
+            "enc": pct(card.enc_pct),
+            "dec": pct(card.dec_pct),
+            "pstate": card.pstate or "n/a",
         }
 
     def _card_row(self, card: GpuDetails, columns: list, widths: dict) -> str:
@@ -424,7 +456,7 @@ class GpuView:
 
     def _cards_box(self, cards: list, width: int, rows: int) -> list:
         inner = max(0, width - 4)
-        columns, widths = self._card_layout(inner)
+        columns, widths = self._card_layout(inner, multi=len(cards) > 1)
         total_power = sum(card.power_w for card in cards if card.power_w)
         parts = []
         if total_power >= 10:
@@ -700,7 +732,7 @@ class GpuView:
 
     def _multi_body(self, cards, rows, width, height, top, inner, accent) -> list:
         content_height = max(1, height - top - 3)
-        columns, widths = self._card_layout(inner)
+        columns, widths = self._card_layout(inner, multi=len(cards) > 1)
         per_card = self._per_card_rows(rows)
 
         body = []
