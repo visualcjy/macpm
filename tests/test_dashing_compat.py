@@ -100,3 +100,14 @@ class DashingCompatTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DashingGuardTests(unittest.TestCase):
+    def test_main_refuses_dashing_two_with_an_actionable_message(self):
+        with mock.patch.object(macpm_mod, "_DASHING_V2", True):
+            with self.assertRaises(SystemExit) as caught:
+                macpm_mod.main()
+
+        message = str(caught.exception)
+        self.assertIn("dashing", message)
+        self.assertIn("dashing<0.2", message)

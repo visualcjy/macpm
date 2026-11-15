@@ -1,5 +1,20 @@
 # Changelog
 
+## 3.0.2 — 2026-11-15
+
+### Fixed
+
+- macpm declares `dashing>=0.1,<0.2` again: dashing 0.2 replaced the
+  `Tile._display(tbox, parent)` / `_draw_title(tbox, ...)` drawing protocol
+  with a buffer-based one, and macpm's custom `FillVSplit`/`SensorPanel`
+  layout overrides rely on the 0.1 signatures.  Installing on a machine that
+  already had dashing 0.2 produced
+  `TypeError: Tile._draw_borders_and_title() missing 1 required positional
+  argument: 'tbox'`.  A runtime guard now names the problem and the fix
+  (`pip install 'dashing<0.2'`) if 0.2 is forced in.
+- The 3.0.1 colour compatibility stays in place, so the code is ready for a
+  future port to the 0.2 API.
+
 ## 3.0.1 — 2026-11-15
 
 ### Fixed

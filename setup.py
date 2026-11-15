@@ -7,7 +7,7 @@ README = (ROOT / "README.md").read_text(encoding="utf-8")
 
 setup(
     name="macpm",
-    version="3.0.1",
+    version="3.0.2",
     author="Jinyu Chen",
     author_email="visualcjy@mail.com",
     url="https://github.com/visualcjy/macpm",
@@ -25,7 +25,7 @@ setup(
     include_package_data=True,
     python_requires=">=3.9",
     install_requires=[
-        "dashing>=0.1",
+        "dashing>=0.1,<0.2",
         "psutil>=5.9",
         "humanize>=4.0",
     ],

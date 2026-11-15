@@ -20,7 +20,7 @@ from .gpuview import GpuView
 from .sensors import SensorReader
 from .tui import RESET_FG, _bottom, _pad, footer
 
-version = 'macpm v3.0.1'
+version = 'macpm v3.0.2'
 
 # dashing 0.2 turned colours into RGB objects behind read-only properties and
 # added ``Tile.set_color``; 0.1 used plain attributes and integer ANSI colours.
@@ -1325,6 +1325,12 @@ def begin(stdscr, sampler):
 
 
 def main():
+    if _DASHING_V2:
+        raise SystemExit(
+            "macpm needs dashing < 0.2: dashing 0.2 changed the drawing API "
+            "that macpm's custom layout relies on.\n"
+            "Fix it with: python3 -m pip install 'dashing<0.2'"
+        )
     linux = platform_name() == "linux"
     if linux:
         print(f"\n{version} - performance monitoring CLI for Linux")
