@@ -132,6 +132,11 @@ pass `CODESIGN_ID` to the build script and submit/staple the archive with
 
 ### Linux (x86_64 / aarch64)
 
+The `Release` workflow builds these four files on native Ubuntu runners
+(`ubuntu-22.04` and `ubuntu-22.04-arm`) on every `v*` tag push and attaches
+them to the release.  The manual steps below are only needed for a local
+build.
+
 On a Linux build host (an arm64 Ubuntu VM in OrbStack is enough: the script
 runs the x86_64 interpreter through Rosetta):
 

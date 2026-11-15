@@ -30,13 +30,47 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+  linux:
+    name: Linux package (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Native runners: python-build-standalone supplies the interpreter,
+          # so the bundle does not depend on the runner's Python or glibc.
+          - runner: ubuntu-22.04
+            arch: x86_64
+          - runner: ubuntu-22.04-arm
+            arch: aarch64
+    env:
+      PYTHON_VERSION: "3.13.18"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Cache python-build-standalone and pip
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/macpm-build/pbs
+            ~/.cache/pip
+          key: linux-${{ matrix.arch }}-pbs-${{ env.PYTHON_VERSION }}
+      - name: Build
+        run: packaging/build-linux.sh ${{ matrix.arch }} --deb
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-${{ matrix.arch }}
+          path: |
+            dist/macpm-*-linux-*.tar.gz
+            dist/macpm_*.deb
+          if-no-files-found: error
+
   publish-pypi:
     name: Publish to PyPI (trusted publishing)
     needs: build
     # Tag pushes only create a GitHub release.  Set the repository variable
     # PUBLISH_PYPI=true (Settings > Secrets and variables > Actions > Variables)
     # to publish to PyPI as well.
-    if: vars.PUBLISH_PYPI == 'true'
+    if: vars.PUBLISH_PYPI == 'true' && startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     environment:
       name: pypi
@@ -57,7 +91,7 @@ jobs:
 
   github-release:
     name: GitHub release
-    needs: [build]
+    needs: [build, linux]
     # Only a tag push creates/updates the release; a manual run is for PyPI.
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
@@ -88,8 +122,12 @@ jobs:
               f"```sh\npython3 -m pip install --upgrade macpm=={version}\n```\n\n"
               "or with Homebrew:\n\n"
               "```sh\nbrew install visualcjy/macpm/macpm\n```\n\n"
-              f"The standalone arm64 tarball (`macpm-{version}-macos-arm64.tar.gz`) "
-              "is attached below.\n"
+              f"The standalone macOS arm64 tarball (`macpm-{version}-macos-arm64.tar.gz`) "
+              "and the self-contained Linux builds "
+              f"(`macpm-{version}-linux-x86_64.tar.gz`, "
+              f"`macpm-{version}-linux-aarch64.tar.gz`, "
+              f"`macpm_{version}_amd64.deb`, `macpm_{version}_arm64.deb`) "
+              "are attached below.\n"
           )
           with open("release-notes.md", "w", encoding="utf-8") as handle:
               handle.write(body)
@@ -100,6 +138,11 @@ jobs:
         with:
           name: python-package
           path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: linux-*
+          path: dist
+          merge-multiple: true
       - uses: softprops/action-gh-release@v2
         with:
           name: macpm ${{ steps.release_notes.outputs.version }}
