@@ -489,6 +489,25 @@ MAC_SAMPLE_WITH_MEMORY = dict(
 )
 
 
+class CardsTitleTests(unittest.TestCase):
+    def test_single_card_title_has_no_power_total(self):
+        view = make_view([])
+        cards = build_cards(sample([card()]), linux_caps())
+
+        line = view._cards_box(cards, 120, 1)[0]
+
+        self.assertIn("GPUs (1)", line)
+        self.assertNotIn("12.0W", line)
+
+    def test_multi_card_title_keeps_the_total(self):
+        view = make_view([])
+        cards = build_cards(TWO_CARD_SAMPLE, linux_caps())
+
+        line = view._cards_box(cards, 120, 2)[0]
+
+        self.assertIn("24W", line)
+
+
 class MacCardColumnTests(unittest.TestCase):
     def test_macos_hides_the_card_column(self):
         rows = [ProcessRow(111, "blender", "alice", 0.0, 0, 42.5, gpu_card="0")]

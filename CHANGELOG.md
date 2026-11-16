@@ -12,6 +12,8 @@
   Metal client (from the IORegistry), and rotates the idle targets beyond its
   32-target cap, so every GPU app is eventually measured instead of the
   lowest-PID daemons taking the slots.
+- A single-card GPU view no longer repeats that card's power in the box title;
+  the total stays on multi-GPU hosts, where each row is one card.
 
 ## 3.2.0 — 2026-11-16
 

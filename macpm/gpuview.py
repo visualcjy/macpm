@@ -635,7 +635,11 @@ class GpuView:
     def _cards_box(self, cards: list, width: int, rows: int) -> list:
         inner = max(0, width - 4)
         columns, widths = self._card_layout(inner, multi=len(cards) > 1)
-        total_power = sum(card.power_w for card in cards if card.power_w)
+        # The row's POWER cell already shows the only card's figure on a
+        # single-GPU host, so a total there would just repeat it.
+        total_power = 0.0
+        if len(cards) > 1:
+            total_power = sum(card.power_w for card in cards if card.power_w)
         parts = []
         if total_power >= 10:
             parts.append(f"{total_power:.0f}W")
