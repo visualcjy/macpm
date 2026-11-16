@@ -103,6 +103,39 @@ def gpu_process_source():
     return None
 
 
+def gpu_process_detail_source():
+    """Callable returning per-process DRM memory for the GPU view, or None.
+
+    Only cards whose driver exposes ``fdinfo`` memory counters (amdgpu, i915,
+    xe) have an answer; vendor *smi tools already report memory themselves.
+    """
+    if is_linux():
+        from .linux_backend.gpu import shared_backend
+
+        monitor = shared_backend()
+        if any(
+            backend.driver in ("amdgpu", "i915", "xe")
+            for backend in monitor.backends
+        ):
+            return monitor.process_details
+    return None
+
+
+def gpu_process_memory_source():
+    """Background per-process GPU memory for the GPU view on macOS, or None.
+
+    Returns a :class:`macpm.footprint.FootprintPoller` (``set_targets`` /
+    ``get`` / ``close``).  Linux DRM cards answer through
+    ``gpu_process_detail_source`` and vendor tools report memory themselves.
+    """
+    if platform_name() == "macos":
+        from .footprint import FootprintPoller, available
+
+        if available():
+            return FootprintPoller()
+    return None
+
+
 def sensor_source():
     """``"smc"`` on macOS, ``"hwmon"`` on Linux."""
     return "hwmon" if is_linux() else "smc"

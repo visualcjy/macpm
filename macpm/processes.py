@@ -129,6 +129,11 @@ class ProcessRow:
     util_known: bool = True
     model: Optional[str] = None
     gpu_list: Optional[list] = None
+    # GPU-accessible system memory (GTT on amdgpu, system0 on i915).  Never
+    # added to ``gpu_mem_mb``: it is a second place the bytes can live.
+    gpu_shared_mb: Optional[float] = None
+    # Why ``gpu_mem_mb`` is unknown (see linux_backend.proc.REASON_*).
+    gpu_note: Optional[str] = None
 
 
 _CLK_TCK = os.sysconf("SC_CLK_TCK") if hasattr(os, "sysconf") else 100
@@ -372,8 +377,18 @@ class ProcessSampler:
             self.error = str(error)
 
         candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        # The table is ranked by CPU, but a process can hold a GPU while using
+        # almost no CPU (an inference worker between requests).  Keep every
+        # process with GPU time, not only the busiest CPU ones.
+        chosen = list(candidates[:self.LIMIT])
+        chosen_pids = {pid for _, pid, _ in chosen}
+        if gpu_times:
+            for item in candidates[self.LIMIT:]:
+                if item[1] in gpu_times and item[1] not in chosen_pids:
+                    chosen.append(item)
+                    chosen_pids.add(item[1])
         rows = []
-        for cpu_pct, pid, name in candidates[:self.LIMIT]:
+        for cpu_pct, pid, name in chosen:
             try:
                 with open(f"/proc/{pid}/cmdline", "rb") as handle:
                     name = _argv_name(handle.read()) or name

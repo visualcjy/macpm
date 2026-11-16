@@ -61,6 +61,30 @@ def calc_freq(states: list, freqs: list) -> tuple[float, float]:
     return float(average), usage / total
 
 
+def ane_usage(raw: dict) -> Optional[float]:
+    """Share of the interval the ANE spent Running, or ``None``.
+
+    ``ANE/status`` is a residency channel in 24 MHz ticks; the sum of every
+    state is the interval, so Running/total is a measured utilisation rather
+    than a power estimate.  ``None`` means the channel or its states were not
+    available, never "0 % but unknown".
+    """
+    channel = (raw or {}).get("status")
+    states = getattr(channel, "states", None)
+    if not states:
+        return None
+    total = 0
+    running = 0
+    for name, residency in states:
+        value = max(0, int(residency or 0))
+        total += value
+        if name.strip().lower() == "running":
+            running += value
+    if total <= 0:
+        return None
+    return min(100.0, running / total * 100.0)
+
+
 def energy_to_joules(value: int, unit: str) -> float:
     return max(0.0, float(value)) * ENERGY_TO_J.get((unit or "").strip().lower(), 1e-3)
 

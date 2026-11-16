@@ -18,7 +18,20 @@ class SplitTests(unittest.TestCase):
         split = FillVSplit(HGauge(), HGauge(), HGauge())
 
         self.assertEqual(split._layout(24), [8, 8, 8])
+        self.assertEqual(split._layout(25), [8, 8, 9])
         self.assertEqual(sum(split._layout(25)), 25)
+
+    def test_fill_layout_caps_the_fixed_rows_and_grows_the_charts(self):
+        split = FillVSplit(
+            HGauge(max_height=6),
+            HGauge(max_height=6),
+            HGauge(),
+            HGauge(),
+            HGauge(),
+        )
+
+        self.assertEqual(split._layout(33), [6, 6, 7, 7, 7])
+        self.assertEqual(split._layout(39), [6, 6, 9, 9, 9])
 
     def test_splits_accept_a_list_or_positional_items(self):
         self.assertEqual(len(VSplit([HGauge(), HGauge()]).items), 2)

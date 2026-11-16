@@ -28,9 +28,11 @@ from .backend import create_sampler, platform_name
 from .capabilities import MACOS_CAPABILITIES
 from .gpuview import GpuView
 from .sensors import SensorReader
-from .tui import RESET_FG, _bottom, _pad, footer
+from .tui import RESET_FG, _pad, footer
 
-version = 'macpm v3.1.0'
+from . import __version__
+
+version = f"macpm v{__version__}"
 
 _DEFAULT_FOOTER = footer("q quit  1-5 view  ←/→ colour  Ctrl+R reset peaks")
 
@@ -202,6 +204,7 @@ def parse_cpu_metrics(powermetrics_parse):
     cpu_metric_dict["p_core"] = p_core
 
     cpu_metric_dict["ane_W"] = cpu_metrics.get("ane_energy", 0) / 1000
+    cpu_metric_dict["ane_usage"] = cpu_metrics.get("ane_usage")
     cpu_metric_dict["cpu_W"] = cpu_metrics.get("cpu_energy", 0) / 1000
     cpu_metric_dict["gpu_W"] = cpu_metrics.get("gpu_energy", 0) / 1000
     cpu_metric_dict["package_W"] = cpu_metrics.get("combined_power", 0) / 1000
@@ -210,6 +213,26 @@ def parse_cpu_metrics(powermetrics_parse):
     cpu_metric_dict["ane_available"] = cpu_metrics.get("ane_energy_available", True)
     cpu_metric_dict["power_source"] = cpu_metrics.get("power_source", "")
     return cpu_metric_dict
+
+
+def ane_gauge_text(cpu_metrics_dict, interval, max_power=16.0):
+    """``(title, percent)`` for the ANE gauge.
+
+    ``ANE Usage`` is the residency share from IOReport's ANE channel.  The
+    ``ane_W / max power`` ratio is only a fallback for machines where that
+    channel is missing; watts are appended only when a sample measured
+    nonzero ANE energy, because the ANE rail reads 0 on recent Apple Silicon
+    even while the engine runs.
+    """
+    power = cpu_metrics_dict.get("ane_W", 0.0) / max(interval, 1e-3)
+    usage = cpu_metrics_dict.get("ane_usage")
+    if usage is None:
+        usage = power / max(max_power, 1.0) * 100
+    percent = int(max(0.0, min(100.0, usage)))
+    title = "ANE Usage: {}%".format(percent)
+    if power > 0.0:
+        title += " @ {0:.1f} W".format(power)
+    return title, percent
 
 
 def parse_gpu_metrics(powermetrics_parse):
@@ -243,6 +266,7 @@ def parse_network_metrics(powermetrics_parse):
 class DefaultView():
     def __init__(self, soc_info_dict, args, netinfo=None, capabilities=None):
         self.netinfo = netinfo
+        self._netinfo_text = ""
         self.caps = capabilities or MACOS_CAPABILITIES
         self._applied_color = args.color
         self._term = None
@@ -408,9 +432,20 @@ class DefaultView():
                         border_color=args.color,
         )
 
-        self.ram_gauge = HGauge(title="RAM Usage", val=0, color=args.color)
+        # One bar, not a stretched gauge: the old HGauge repeated the same RAM
+        # bar on every spare row, which read as a duplicated line.  The detail
+        # panel below it carries swap and the macOS memory zones instead.
+        self.ram_gauge = HGauge(
+            title="RAM Usage",
+            val=0,
+            color=args.color,
+            min_height=2,
+            max_height=2,
+        )
+        self.memory_detail = SensorPanel(color=args.color, lines=[], fill=True)
         self.memory_gauges = VSplit(
             self.ram_gauge,
+            self.memory_detail,
                         border_color=args.color,
             title="Memory",
         )
@@ -420,6 +455,16 @@ class DefaultView():
             title="Temps & Fans",
             border_color=args.color,
         )
+        # The processor box and the Memory/Temps row have a fixed number of
+        # content lines.  FillVSplit caps them and hands any surplus rows to
+        # the charts, so a taller terminal no longer repeats a bar or leaves
+        # a blank line in the Memory panel.
+        if not args.show_cores:
+            self.processor_split.max_height = 2 + 2 * len(self.processor_gauges)
+        self.memory_gauges.max_height = 6
+        self.sensor_panel.max_height = 6
+        self.memory_row = HSplit(self.memory_gauges, self.sensor_panel)
+        self.memory_row.max_height = 6
 
         self.cpu_power_chart = None
         self.gpu_power_chart = None
@@ -486,7 +531,7 @@ class DefaultView():
             # the vertical space available to the charts.
             self.ui = FillVSplit(
                 self.processor_split,
-                HSplit(self.memory_gauges, self.sensor_panel),
+                self.memory_row,
                 *tail,
             )
         self.usage_gauges = self.ui.items[0]
@@ -517,25 +562,6 @@ class DefaultView():
         self.avg_package_power_list = deque([], maxlen=max(1, int(args.avg / args.interval)))
         self.avg_cpu_power_list = deque([], maxlen=max(1, int(args.avg / args.interval)))
         self.avg_gpu_power_list = deque([], maxlen=max(1, int(args.avg / args.interval)))
-
-    def _processor_spare_row(self, height):
-        """Row of the processor box left blank by the fixed split layout."""
-        if self.show_cores:
-            panel_height = height - 1
-        else:
-            items = len(getattr(self.ui, "items", ())) or 1
-            panel_height = (height - 1) // items
-        inner = panel_height - 2
-        gauges = len(self.processor_gauges)
-        if inner <= 0 or gauges <= 0:
-            return None
-        item_height = inner // gauges
-        if item_height < 1:
-            return None
-        used = item_height * gauges
-        if used >= inner:
-            return None
-        return 1 + used
 
     def _processor_width(self, width):
         if not self.show_cores:
@@ -587,32 +613,35 @@ class DefaultView():
             return
         accent = term.color(args.color)
         reset = RESET_FG
-        out = []
-        row = self._processor_spare_row(height)
-        if row is not None:
-            text = ""
-            # The per-core layout puts the core gauges right above this row;
-            # keep the network identity out of it and only show it in view 1.
-            if not self.show_cores and self.netinfo is not None:
-                local, public = self.netinfo.snapshot()
-                text = format_netinfo(local, public)
-            panel_width = self._processor_width(width)
-            # In the per-core layout this row is inside the GPU panel; writing
-            # even an empty padded line would erase its first card row.
-            if not self.show_cores:
-                out.append(
-                    term.move(row, 2)
-                    + accent
-                    + _pad(text, max(0, panel_width - 4))
-                    + reset
-                )
-        out.append(term.move(height - 1, 0) + accent + _bottom(width, _DEFAULT_FOOTER) + reset)
+        # The key hints are plain text on the last terminal row: the network
+        # summary already has the Network IO box's bottom border.
+        out = [
+            term.move(height - 1, 0)
+            + accent
+            # One extra space so the hints start in the same column as the
+            # network text on the box border above ("└ en0 …" / "  macpm …").
+            + _pad(" " + _DEFAULT_FOOTER, width)
+            + reset
+        ]
         print("".join(out), end="", flush=True)
 
     def display(self,powermetrics_parse,args,sensors=None,update=True):
         if self.netinfo is not None:
             self.netinfo.refresh_local()
             self.netinfo.refresh_public()
+            # Keep the last non-empty text: a momentarily empty snapshot must
+            # not blank the status line.
+            local, public = self.netinfo.snapshot()
+            text = format_netinfo(local, public)
+            if text:
+                self._netinfo_text = text
+            # The network summary rides the bottom border of the last panel
+            # (Network IO), so it is framed like the rest of the layout.
+            self.network_io_charts.bottom_title = (
+                " " + self._netinfo_text + " "
+                if (not self.show_cores and self._netinfo_text)
+                else ""
+            )
         if sensors is not None:
             self.sensor_panel.lines = sensors.lines()
             self.sensor_panel.levels = sensors.fan_levels()
@@ -743,16 +772,9 @@ class DefaultView():
                 ane_power_W = cpu_metrics_dict["ane_W"] / args.interval
                 if ane_power_W > self.ane_max_power:
                     self.ane_max_power = ane_power_W
-                ane_util_percent = int(
-                    ane_power_W / self.ane_max_power * 100)
-                self.ane_gauge.title = "".join([
-                    "ANE Usage: ",
-                    str(ane_util_percent),
-                    "% @ ",
-                    '{0:.1f}'.format(ane_power_W),
-                    " W"
-                ])
-                self.ane_gauge.value = ane_util_percent
+                self.ane_gauge.title, self.ane_gauge.value = ane_gauge_text(
+                    cpu_metrics_dict, args.interval, self.ane_max_power
+                )
 
             ram_metrics_dict = get_ram_metrics_dict()
 
@@ -763,15 +785,15 @@ class DefaultView():
                     ram_metrics_dict["swap_used_GB"],
                     ram_metrics_dict["swap_total_GB"],
                 )
-            self.ram_gauge.title = " ".join([
-                "RAM:",
-                "{}/{}GB".format(
-                    ram_metrics_dict["used_GB"],
-                    ram_metrics_dict["total_GB"],
-                ),
-                swap_text,
-            ])
+            self.ram_gauge.title = "RAM: {}/{}GB".format(
+                ram_metrics_dict["used_GB"],
+                ram_metrics_dict["total_GB"],
+            )
             self.ram_gauge.value = ram_metrics_dict["free_percent"]
+            self.memory_detail.lines = [
+                swap_text,
+                _ram_detail_line(ram_metrics_dict, self.caps.platform),
+            ]
 
             """
 
@@ -1317,6 +1339,8 @@ def begin(stdscr, sampler):
     except KeyboardInterrupt:
         print("Stopping...")
     finally:
+        if gpu_view is not None:
+            gpu_view.close()
         sensors.close()
 
     return

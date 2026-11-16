@@ -11,7 +11,15 @@ from .cpu import CpuSampler, classify_cores
 from .gpu import GpuBackend, GpuSample, shared_backend
 from .net import LinuxNetworkSampler
 from .power import EnergySampler, RaplReader
-from .proc import per_process_gpu_ns, scan_drm_clients, socket_owners
+from .proc import (
+    DrmScan,
+    attribute_drm_clients,
+    parse_fdinfo,
+    per_process_gpu_ns,
+    scan_drm,
+    scan_drm_clients,
+    socket_owners,
+)
 from .sampler import LinuxSampler
 from .soc import get_soc_info
 from .sysfs import SysRoot
@@ -19,6 +27,7 @@ from .thermal import ThermalPressure, ThermalReader
 
 __all__ = [
     "CpuSampler",
+    "DrmScan",
     "EnergySampler",
     "GpuBackend",
     "GpuSample",
@@ -28,9 +37,12 @@ __all__ = [
     "SysRoot",
     "ThermalPressure",
     "ThermalReader",
+    "attribute_drm_clients",
     "classify_cores",
     "get_soc_info",
+    "parse_fdinfo",
     "per_process_gpu_ns",
+    "scan_drm",
     "scan_drm_clients",
     "shared_backend",
     "socket_owners",

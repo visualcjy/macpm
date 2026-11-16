@@ -80,12 +80,21 @@ class FillVSplit(VSplit):
             return []
         base, extra = divmod(total_height, count)
         heights = [base] * count
-        if count > 1 and extra:
-            share, remainder = divmod(extra, count - 1)
-            for index in range(1, count):
-                heights[index] += share
-                if index - 1 < remainder:
-                    heights[index] += 1
+        for offset in range(extra):
+            heights[count - 1 - (offset % count)] += 1
+        # The first two panels are the processor box and the Memory/Temps row:
+        # their content is a fixed number of lines, so extra rows there only
+        # became blank space or a repeated RAM bar.  Cap them and hand the
+        # surplus to the charts below (items 2..n).
+        for index in range(min(2, count)):
+            cap = getattr(self.items[index], "max_height", 0)
+            if cap:
+                heights[index] = min(heights[index], cap)
+        remaining = total_height - sum(heights)
+        if remaining > 0:
+            growable = list(range(min(2, count), count)) or [count - 1]
+            for offset in range(remaining):
+                heights[growable[offset % len(growable)]] += 1
         return heights
 
 

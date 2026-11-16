@@ -469,3 +469,141 @@ class CardLineTests(unittest.TestCase):
 
         self.assertIn("48%", view.gpu_cards[1].lines[0])
         self.assertIn("G3 P2 70W", view.gpu_cards[1].title)
+
+
+# -- GPU memory comes from the GPU, never from RSS -------------------------
+
+
+MAC_SAMPLE_WITH_MEMORY = dict(
+    MAC_SAMPLE,
+    gpu={
+        "freq_hz": 1350,
+        "idle_ratio": 0.4,
+        "name": "Apple M3 Max",
+        "gpu_cores": 30,
+        "renderer_pct": 44,
+        "tiler_pct": 45,
+        "mem_used_mb": 5120.0,
+        "mem_total_mb": 65536.0,
+    },
+)
+
+
+class GpuMemoryCellTests(unittest.TestCase):
+    def test_unknown_gpu_memory_renders_na_not_rss(self):
+        row = ProcessRow(111, "blender", "alice", 0.0, 3 * 1024 ** 3, 42.5,
+                         gpu_card="0")
+
+        text = make_view([row])._process_text(row)
+
+        self.assertIn("n/a", text)
+        self.assertNotIn("3.0G", text)
+
+    def test_shared_memory_is_a_second_number_not_a_sum(self):
+        row = ProcessRow(111, "llama", "root", 0.0, 0, 90.0,
+                         gpu_card="0", gpu_mem_mb=13312.0, gpu_shared_mb=1228.0)
+
+        text = make_view([row])._process_text(row)
+
+        self.assertIn("13G", text)
+        self.assertNotIn("14G", text)
+
+    def test_integrated_gpu_shows_its_gtt_as_gpu_memory(self):
+        row = ProcessRow(111, "llama", "root", 0.0, 0, 90.0,
+                         gpu_card="0", gpu_mem_mb=None, gpu_shared_mb=2048.0)
+
+        self.assertIn("2.0G", make_view([row])._process_text(row))
+
+    def test_macos_card_cell_uses_allocated_memory(self):
+        cards = build_cards(MAC_SAMPLE_WITH_MEMORY, Capabilities())
+        view = make_view([], caps=Capabilities())
+
+        cell = view._card_cells(cards[0])["vram"]
+
+        self.assertTrue(cell.startswith("▉") or cell.startswith("▏"))
+        self.assertIn("5.0G/64.0G", cell)
+
+    def test_macos_without_registry_data_keeps_unified(self):
+        cards = build_cards(MAC_SAMPLE, Capabilities())
+        view = make_view([], caps=Capabilities())
+
+        self.assertEqual(view._card_cells(cards[0])["vram"], "unified")
+
+
+class MacInfoTests(unittest.TestCase):
+    def test_info_box_mentions_cores_and_engine_split(self):
+        view = make_view([], caps=Capabilities(), height=20)
+        view._info_source = False
+
+        output = render(view, sample_data=MAC_SAMPLE_WITH_MEMORY)
+
+        self.assertIn("30 GPU cores", output)
+        self.assertIn("unified memory", output)
+        self.assertIn("renderer 44%", output)
+        self.assertIn("tiler 45%", output)
+
+
+class DetailAttachTests(unittest.TestCase):
+    def _view(self, rows, details):
+        view = make_view(rows)
+        view._details_source = lambda: details
+        return view
+
+    def test_card_and_memory_are_attached_by_pid(self):
+        row = ProcessRow(111, "worker", "root", 0.0, 0, 90.0)
+        view = self._view([row], {111: {
+            "cards": [0], "vram_bytes": 2048 * 1024 ** 2,
+            "gtt_bytes": 512 * 1024 ** 2, "reason": "",
+        }})
+
+        rows = view._attach_details([row])
+
+        self.assertEqual(rows[0].gpu_card, "0")
+        self.assertEqual(rows[0].gpu_mem_mb, 2048.0)
+        self.assertEqual(rows[0].gpu_shared_mb, 512.0)
+        self.assertIsNone(rows[0].gpu_note)
+
+    def test_multi_card_label_is_a_range(self):
+        row = ProcessRow(7, "EngineCore", "root", 0.0, 0, 90.0)
+        view = self._view([row], {7: {
+            "cards": [2, 3, 4], "vram_bytes": 1024, "gtt_bytes": 0, "reason": "",
+        }})
+
+        rows = view._attach_details([row])
+
+        self.assertEqual(rows[0].gpu_card, "2-4")
+        self.assertEqual(rows[0].gpu_list, [2, 3, 4])
+
+    def test_unattributed_memory_stays_na_with_a_reason(self):
+        row = ProcessRow(111, "worker", "root", 0.0, 0, 90.0)
+        view = self._view([row], {111: {
+            "cards": [0], "vram_bytes": None, "gtt_bytes": None,
+            "reason": "shared_buffers",
+        }})
+
+        rows = view._attach_details([row])
+
+        self.assertIsNone(rows[0].gpu_mem_mb)
+        self.assertEqual(rows[0].gpu_note, "shared_buffers")
+        self.assertIn("n/a", view._process_text(rows[0]))
+
+    def test_idle_tiny_clients_are_left_out(self):
+        row = ProcessRow(111, "idle", "root", 0.0, 0, 0.0)
+        view = self._view([row], {111: {
+            "cards": [0], "vram_bytes": 0, "gtt_bytes": 0, "reason": "",
+        }})
+
+        rows = view._attach_details([row])
+
+        self.assertIsNone(rows[0].gpu_card)
+
+    def test_shared_column_appears_only_when_there_is_shared_memory(self):
+        columns, _ = make_view([])._process_layout(76, False, True)
+        self.assertIn("shared", columns)
+
+        plain = ProcessRow(111, "worker", "root", 0.0, 0, 90.0,
+                           gpu_card="0", gpu_mem_mb=2048.0)
+        view = make_view([plain])
+        output = render(view)
+
+        self.assertNotIn("SHARED", output)

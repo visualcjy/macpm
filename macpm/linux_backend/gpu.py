@@ -25,13 +25,16 @@ import time
 from dataclasses import dataclass
 from typing import Optional
 
-from .proc import scan_drm_clients
+from .proc import attribute_drm_clients, scan_drm
 from .sysfs import SysRoot
 
 _DRM_GLOB = "/sys/class/drm/card[0-9]*"
 _SMCLK_RE = re.compile(r"(\d+)\s*Mhz", re.IGNORECASE)
 _CARD_RE = re.compile(r"^card\d+$")
 _NVIDIA_INFO_GLOB = "/proc/driver/nvidia/gpus/*/information"
+
+# Drivers whose fdinfo carries per-process engine time and memory.
+_DRM_PER_PROCESS = ("amdgpu", "i915", "xe")
 
 
 
@@ -595,11 +598,14 @@ class GpuBackend:
         self.gpu_index = gpu_index
         self._previous_totals: Optional[dict] = None
         self._clients_at = 0.0
-        self._clients: dict = {}
+        self._clients: list = []
         self._nvidia_at = 0.0
         self._nvidia_sample: Optional[GpuSample] = None
         self.scan_interval = 0.8
         self.smi_interval = 2.0
+        # Set by GpuMonitor: how many DRM cards exist (an fdinfo without
+        # drm-pdev can only be attributed when there is a single one).
+        self.drm_siblings = 1
 
     # -- detection ---------------------------------------------------------
 
@@ -625,7 +631,22 @@ class GpuBackend:
 
     @property
     def per_process_supported(self) -> bool:
-        return self.driver in ("amdgpu", "i915", "xe")
+        return self.driver in _DRM_PER_PROCESS
+
+    @property
+    def pdev(self) -> str:
+        """PCI address of this card (``0000:03:00.0``), as fdinfo spells it.
+
+        ``drm-pdev`` is how a client says which card it belongs to; without it
+        a multi-card machine cannot attribute processes to a card.
+        """
+        if not self.card:
+            return ""
+        text = self.sys.read(self.card + "/device/uevent") or ""
+        for line in text.splitlines():
+            if line.startswith("PCI_SLOT_NAME="):
+                return line.split("=", 1)[1].strip()
+        return ""
 
     def capabilities(self) -> dict:
         """Static report of what this driver exposes (used before sampling)."""
@@ -663,13 +684,19 @@ class GpuBackend:
 
     # -- sampling ----------------------------------------------------------
 
-    def sample(self, elapsed: float) -> GpuSample:
+    def sample(self, elapsed: float, scan=None) -> GpuSample:
+        """One card's readings.
+
+        ``scan`` is the fdinfo walk :meth:`GpuMonitor.samples` already made for
+        this refresh; passing it keeps an 8-card host at one walk instead of
+        eight.  Without it the card reads (and caches) its own.
+        """
         if not self.driver:
             return GpuSample(available=False, name=self.name, driver=self.driver)
         if self.driver == "amdgpu":
             return self._sample_amdgpu()
         if self.driver in ("i915", "xe"):
-            return self._sample_intel(elapsed)
+            return self._sample_intel(elapsed, scan)
         if self.driver == "nvidia":
             return self._sample_nvidia()
         return self._sample_generic()
@@ -711,7 +738,7 @@ class GpuBackend:
             temp_c=_hwmon_temp(self.sys, device),
         )
 
-    def _sample_intel(self, elapsed: float) -> GpuSample:
+    def _sample_intel(self, elapsed: float, scan=None) -> GpuSample:
         device = (self.card or "") + "/device"
         freq = self.sys.read_int(device + "/gt_cur_freq_mhz")
         maximum = self.sys.read_int(device + "/gt_max_freq_mhz")
@@ -723,7 +750,7 @@ class GpuBackend:
             available=True,
             name=self.name,
             driver=self.driver,
-            busy_pct=self._clients_busy(elapsed),
+            busy_pct=self._clients_busy(elapsed, scan),
             freq_mhz=float(freq) if freq else None,
             max_freq_mhz=float(maximum) if maximum else None,
             power_w=_hwmon_power(self.sys, device),
@@ -732,11 +759,15 @@ class GpuBackend:
             temp_c=_hwmon_temp(self.sys, device),
         )
 
-    def _clients_busy(self, elapsed: float) -> Optional[float]:
-        clients = self._drm_clients()
+    def _clients_busy(self, elapsed: float, scan=None) -> Optional[float]:
+        clients = self._clients_for(scan) if scan is not None else self._card_clients()
+        if clients is None:
+            # Several cards and no drm-pdev in fdinfo: the aggregate belongs to
+            # no card in particular, so neither row may claim it.
+            return None
         totals: dict = {}
-        for engines in clients.values():
-            for engine, nanos in engines.items():
+        for client in clients:
+            for engine, nanos in client.engines.items():
                 totals[engine] = totals.get(engine, 0) + nanos
         previous = self._previous_totals
         self._previous_totals = totals
@@ -751,22 +782,38 @@ class GpuBackend:
             return 0.0
         return max(0.0, min(100.0, best / (max(elapsed, 1e-3) * 1e9) * 100.0))
 
-    def _drm_clients(self) -> dict:
+    def _clients_for(self, scan) -> Optional[list]:
+        """The clients of this card inside ``scan``.
+
+        ``None`` means "cannot tell": several cards exist but the kernel does
+        not say which one a client belongs to, so no card may claim it.  An
+        empty list is a real answer (this card has no clients).
+        """
+        pdev = self.pdev
+        if pdev:
+            return [client for client in scan.clients if client.pdev == pdev]
+        if self.drm_siblings <= 1:
+            return list(scan.clients)
+        return None
+
+    def _card_clients(self) -> list:
+        """DRM clients for the standalone path, cached for ``scan_interval``."""
         now = time.monotonic()
         if self._clients_at and now - self._clients_at < self.scan_interval:
             return self._clients
-        self._clients = scan_drm_clients(self.sys)
+        self._clients = self._clients_for(scan_drm(self.sys)) or []
         self._clients_at = now
         return self._clients
 
     def per_process(self) -> dict:
-        """``{pid: ns}`` from the cached DRM client scan (busiest engine)."""
-        clients = self._drm_clients()
-        return {
-            pid: max(engines.values())
-            for pid, engines in clients.items()
-            if engines
-        }
+        """``{pid: ns}`` of GPU time on this card, summed over the process's clients."""
+        totals: dict = {}
+        for client in self._card_clients():
+            if not client.engines:
+                continue
+            busy = max(client.engines.values())
+            totals[client.pid] = totals.get(client.pid, 0) + busy
+        return totals
 
     def _sample_nvidia(self) -> GpuSample:
         rows = _nvidia_rows(self.sys)
@@ -1247,9 +1294,10 @@ class GpuMonitor:
 
     ``sample()`` keeps the single-GPU contract used by the main sampler and the
     process view (the busiest card); ``samples()`` returns one entry per card
-    for the GPU view.  Intel cards share one ``fdinfo`` counter, so with more
-    than one Intel GPU the per-card utilisation is reported as ``n/a`` instead
-    of duplicating the aggregate on every row.
+    for the GPU view.  One fdinfo walk serves every card: clients carry their
+    ``drm-pdev``, so a process is charged to the card it actually holds.  With
+    several cards and no ``drm-pdev`` in fdinfo the per-card figure is ``n/a``
+    instead of duplicating the aggregate on every row.
     """
 
     def __init__(self, sysroot: Optional[SysRoot], backends: list):
@@ -1262,10 +1310,54 @@ class GpuMonitor:
     @classmethod
     def detect(cls, sysroot: Optional[SysRoot] = None) -> "GpuMonitor":
         sys = sysroot or SysRoot()
-        return cls(
+        monitor = cls(
             sys,
             _drm_backends(sys) + _nvidia_backends(sys) + _smi_backends(sys),
         )
+        drm = [
+            backend
+            for backend in monitor.backends
+            if backend.driver in _DRM_PER_PROCESS
+        ]
+        for backend in drm:
+            backend.drm_siblings = len(drm)
+        return monitor
+
+    def process_details(self) -> dict:
+        """``{pid: {cards, vram_bytes, gtt_bytes, reason}}`` for the DRM cards.
+
+        Bytes are ``None`` whenever the kernel's counters cannot prove they are
+        private; ``reason`` then says why.  A process seen on two cards loses
+        its totals if either card is unattributable rather than showing half.
+        """
+        cards = [
+            (index, backend)
+            for index, backend in enumerate(self.backends)
+            if backend.driver in _DRM_PER_PROCESS
+        ]
+        if not cards:
+            return {}
+        scan = scan_drm(self.sys)
+        result: dict = {}
+        for index, backend in cards:
+            if not backend.pdev and len(cards) > 1:
+                continue
+            for pid, record in attribute_drm_clients(scan, backend.pdev).items():
+                entry = result.setdefault(
+                    pid, {"cards": [], "vram_bytes": 0, "gtt_bytes": 0, "reason": ""}
+                )
+                if index not in entry["cards"]:
+                    entry["cards"].append(index)
+                if record["reason"]:
+                    entry["reason"] = record["reason"]
+                    entry["vram_bytes"] = None
+                    entry["gtt_bytes"] = None
+                elif not entry["reason"]:
+                    entry["vram_bytes"] += record["vram_bytes"] or 0
+                    entry["gtt_bytes"] += record["gtt_bytes"] or 0
+        for entry in result.values():
+            entry["cards"].sort()
+        return result
 
     @property
     def available(self) -> bool:
@@ -1403,16 +1495,19 @@ class GpuMonitor:
         return aggregate
 
     def samples(self, elapsed: float) -> list:
-        intel_count = sum(
-            1 for backend in self.backends if backend.driver in ("i915", "xe")
-        )
         samples = []
         now = time.monotonic()
+        # One fdinfo walk for every card: an 8-GPU host would otherwise read
+        # every process's fd table eight times per refresh.
+        scan = None
+        if any(backend.driver in _DRM_PER_PROCESS for backend in self.backends):
+            scan = scan_drm(self.sys)
         for position, backend in enumerate(self.backends):
-            sample = backend.sample(elapsed)
+            if backend.driver in _DRM_PER_PROCESS:
+                sample = backend.sample(elapsed, scan)
+            else:
+                sample = backend.sample(elapsed)
             sample.index = position
-            if backend.driver in ("i915", "xe") and intel_count > 1:
-                sample.busy_pct = None
             samples.append(sample)
         for sample in samples:
             if sample.busy_pct is None:
@@ -1448,14 +1543,31 @@ class GpuMonitor:
         return self.primary(self.samples(elapsed))
 
     def per_process(self) -> dict:
+        """``{pid: ns}`` of GPU time across every card and vendor tool.
+
+        A process holding several cards is not counted twice: its busiest card
+        wins, the same convention as :meth:`primary` for the one-number view.
+        Vendor tools still add up, because each one reports its own device.
+        """
         totals = {}
-        if any(
-            backend.driver in ("amdgpu", "i915", "xe") for backend in self.backends
-        ):
-            clients = scan_drm_clients(self.sys)
-            for pid, engines in clients.items():
-                if engines:
-                    totals[pid] = totals.get(pid, 0) + max(engines.values())
+        drm = [
+            (index, backend)
+            for index, backend in enumerate(self.backends)
+            if backend.driver in _DRM_PER_PROCESS
+        ]
+        if drm:
+            scan = scan_drm(self.sys)
+            per_card: dict = {}
+            for index, backend in drm:
+                card_totals = per_card.setdefault(index, {})
+                for client in backend._clients_for(scan) or []:
+                    if not client.engines:
+                        continue
+                    busy = max(client.engines.values())
+                    card_totals[client.pid] = card_totals.get(client.pid, 0) + busy
+            for card_totals in per_card.values():
+                for pid, nanos in card_totals.items():
+                    totals[pid] = max(totals.get(pid, 0), nanos)
         for backend in self.backends:
             if isinstance(backend, VendorSmiBackend):
                 for pid, nanos in backend.per_process().items():

@@ -7,7 +7,10 @@ glance.  The table below ranks processes by GPU time.
 Linux fills ``sample["gpus"]`` with one entry per card (amdgpu sysfs, Intel
 ``gt_*``/``fdinfo``, ``nvidia-smi`` rows); macOS reports a single GPU.  The
 process column comes from the same reader the process view uses (DRM ``fdinfo``
-on Linux, IOAccelerator on macOS).
+on Linux, IOAccelerator on macOS).  Per-process memory is a GPU number, never
+RSS: AMD/Intel DRM cards get it from ``fdinfo`` through the private-client gate
+(``linux_backend.proc``) and are grouped by the card they hold, NVIDIA/Iluvatar
+/… rows get it from the vendor tool, and an unknown figure stays ``n/a``.
 """
 
 from __future__ import annotations
@@ -22,7 +25,11 @@ from typing import Optional
 
 from blessed import Terminal
 
-from .backend import gpu_process_source
+from .backend import (
+    gpu_process_detail_source,
+    gpu_process_memory_source,
+    gpu_process_source,
+)
 from .capabilities import MACOS_CAPABILITIES, Capabilities
 from .processes import ProcessRow, ProcessSampler
 from .tui import RESET_FG, _border, _bottom, _center, _fit, _format_mem, _pad, _text_width, footer
@@ -34,7 +41,8 @@ _HEADER = {
     "user": "USER",
     "card": "CARD",
     "gpu": "GPU%",
-    "mem": "MEM",
+    "mem": "GPU MEM",
+    "shared": "SHARED",
     "model": "MODEL",
 }
 _FOOTER = footer("q quit  1-5 view  s sort  ↑/↓ page  Space pause  ←/→ colour")
@@ -77,6 +85,11 @@ class GpuDetails:
     dec_pct: Optional[float] = None
     pstate: str = ""
     note: str = ""
+    # macOS only: the IOAccelerator reports its engine split separately from
+    # IOReport's utilisation, and how many GPU cores the chip has.
+    renderer_pct: Optional[float] = None
+    tiler_pct: Optional[float] = None
+    cores: Optional[int] = None
 
     @property
     def mem_pct(self) -> Optional[float]:
@@ -92,6 +105,46 @@ def _as_float(value) -> Optional[float]:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _as_int(value) -> Optional[int]:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _gpu_memory_mb(row) -> Optional[float]:
+    """The GPU memory to show for a process, or ``None`` when unknown.
+
+    Dedicated memory wins; an integrated GPU has none, so its GTT bytes are
+    the process's GPU memory rather than spill.  RSS is deliberately not a
+    fallback: system memory in a GPU-memory column is a lie.
+    """
+    if row.gpu_mem_mb is not None:
+        return row.gpu_mem_mb
+    return row.gpu_shared_mb
+
+
+def _memory_text(mb: Optional[float]) -> str:
+    if mb is None:
+        return "n/a"
+    return _format_mem(int(mb * 1024 * 1024))
+
+
+def _card_label(cards: list) -> str:
+    """``[0]`` / ``[0-1]`` / ``[0,2]`` for the cards a process holds."""
+    if not cards:
+        return ""
+    ordered = sorted(set(cards))
+    consecutive = ordered == list(range(ordered[0], ordered[0] + len(ordered)))
+    if len(ordered) == 1:
+        return str(ordered[0])
+    if consecutive:
+        return f"{ordered[0]}-{ordered[-1]}"
+    return ",".join(str(card) for card in ordered)
 
 
 def _details(
@@ -122,9 +175,14 @@ def _details(
     )
     driver = gpu.get("driver") or ("IOReport" if capabilities.platform == "macos" else "")
 
+    mem_used = _as_float(gpu.get("mem_used_mb"))
     note = ""
     if capabilities.gpu_util_self_only:
         note = "own processes only"
+    elif capabilities.platform == "macos" and mem_used is not None:
+        # The IOAccelerator only reports a total: every process's Metal
+        # allocations, not the sum of the rows below.
+        note = "GPU alloc: all processes"
 
     return GpuDetails(
         index=index,
@@ -134,7 +192,7 @@ def _details(
         freq_mhz=_as_float(gpu.get("freq_hz")),
         max_freq_mhz=_as_float(gpu.get("max_freq_mhz")),
         power_w=power,
-        mem_used_mb=_as_float(gpu.get("mem_used_mb")),
+        mem_used_mb=mem_used,
         mem_total_mb=_as_float(gpu.get("mem_total_mb")),
         temp_c=temperature,
         busy_recent=_as_float(gpu.get("busy_recent")),
@@ -143,6 +201,9 @@ def _details(
         dec_pct=_as_float(gpu.get("dec_pct")),
         pstate=str(gpu.get("pstate") or ""),
         note=note,
+        renderer_pct=_as_float(gpu.get("renderer_pct")),
+        tiler_pct=_as_float(gpu.get("tiler_pct")),
+        cores=_as_int(gpu.get("gpu_cores")),
     )
 
 
@@ -289,6 +350,18 @@ class GpuView:
         self.sampler = (
             _VendorProcessSampler(source) if source is not None else ProcessSampler()
         )
+        details = None
+        try:
+            details = gpu_process_detail_source()
+        except Exception:
+            details = None
+        self._details_source = details
+        memory = None
+        try:
+            memory = gpu_process_memory_source()
+        except Exception:
+            memory = None
+        self._memory_source = memory
         self.rows: list = []
         self.cards: list = []
         self._sorted: Optional[list] = None
@@ -314,7 +387,7 @@ class GpuView:
     def prime(self) -> None:
         """Reset the GPU-time baselines and show "collecting" until the next sample."""
         self.sampler.reset()
-        self.rows = self.sampler.sample()
+        self.rows = self._collect()
         self._sorted = None
         self._last_sample = time.monotonic()
         self.ready = False
@@ -328,9 +401,103 @@ class GpuView:
         if self.ready and now - self._last_sample < self.refresh_interval:
             return
         self._last_sample = now
-        self.rows = self.sampler.sample()
+        self.rows = self._collect()
         self._sorted = None
         self.ready = True
+
+    def _collect(self) -> list:
+        rows = self.sampler.sample()
+        rows = self._attach_details(rows)
+        return self._attach_footprint(rows)
+
+    def _attach_details(self, rows: list) -> list:
+        """Fill in per-process GPU memory and card for DRM cards.
+
+        Memory comes from the card's own counters (``fdinfo``), not from the
+        process table: a row keeps ``n/a`` when the kernel cannot prove the
+        bytes are private, instead of showing RSS as if it were VRAM.
+        """
+        source = getattr(self, "_details_source", None)
+        if source is None or not rows:
+            return rows
+        try:
+            details = source() or {}
+        except Exception:
+            return rows
+        if not details:
+            return rows
+        for row in rows:
+            detail = details.get(row.pid)
+            if not detail:
+                continue
+            vram_mb = detail.get("vram_bytes")
+            gtt_mb = detail.get("gtt_bytes")
+            vram_mb = None if vram_mb is None else vram_mb / (1024.0 * 1024.0)
+            gtt_mb = None if gtt_mb is None else gtt_mb / (1024.0 * 1024.0)
+            # Idle processes that hold a client but nothing worth showing stay
+            # out of the ranking; a few idle megabytes is not "using the GPU".
+            if (
+                row.gpu_pct <= 0.05
+                and (vram_mb or 0) < 16.0
+                and (gtt_mb or 0) < 16.0
+            ):
+                continue
+            cards = detail.get("cards") or []
+            if row.gpu_card is None and cards:
+                row.gpu_card = _card_label(cards)
+                if len(cards) > 1:
+                    row.gpu_list = list(cards)
+            if row.gpu_mem_mb is None:
+                row.gpu_mem_mb = vram_mb
+            if row.gpu_shared_mb is None:
+                row.gpu_shared_mb = gtt_mb
+            if detail.get("reason"):
+                row.gpu_note = detail["reason"]
+        return rows
+
+    def _attach_footprint(self, rows: list) -> list:
+        """Per-process GPU memory on macOS, measured in the background.
+
+        ``footprint`` costs ~15 ms per process, so the poller is handed the
+        rows as targets and the view only reads what is already known; a
+        process that has not been measured yet stays ``n/a``.
+        """
+        source = getattr(self, "_memory_source", None)
+        if source is None or not rows:
+            return rows
+        targets = [
+            (row.pid, row.gpu_pct > 0.5)
+            for row in rows
+            if row.gpu_mem_mb is None and row.gpu_card is None
+        ]
+        try:
+            source.set_targets(targets)
+        except Exception:
+            return rows
+        for row in rows:
+            if row.gpu_mem_mb is not None:
+                continue
+            try:
+                value = source.get(row.pid)
+            except Exception:
+                value = None
+            if value is None:
+                row.gpu_note = row.gpu_note or "footprint"
+                continue
+            row.gpu_mem_mb = value / (1024.0 * 1024.0)
+            if row.gpu_note == "footprint":
+                row.gpu_note = None
+        return rows
+
+    def close(self) -> None:
+        """Stop the macOS measurement thread (the rest of the view is stateless)."""
+        source = getattr(self, "_memory_source", None)
+        self._memory_source = None
+        if source is not None:
+            try:
+                source.close()
+            except Exception:
+                pass
 
     def toggle_pause(self) -> None:
         self.paused = not self.paused
@@ -495,7 +662,7 @@ class GpuView:
         key = {
             "pid": lambda row: row.pid,
             "name": lambda row: (row.name.lower(), row.pid),
-            "mem": lambda row: -(row.gpu_mem_mb or 0.0),
+            "mem": lambda row: -(_gpu_memory_mb(row) or 0.0),
         }[order]
         per_card = {}
         for row in rows:
@@ -511,10 +678,7 @@ class GpuView:
         return per_card
 
     def _process_text(self, row: ProcessRow) -> str:
-        if row.gpu_mem_mb is not None:
-            memory = _format_mem(int(row.gpu_mem_mb * 1024 * 1024))
-        else:
-            memory = _format_mem(row.mem_bytes)
+        memory = _memory_text(_gpu_memory_mb(row))
         span = ""
         cards = row.gpu_card or ""
         if any(char in cards for char in "-,"):
@@ -603,7 +767,15 @@ class GpuView:
         if info.get("vendor"):
             second.append(info["vendor"])
         if self.caps.platform == "macos":
-            second.extend(["unified memory", "IOReport"])
+            card = cards[0] if cards else None
+            if card is not None and card.cores:
+                second.append(f"{card.cores} GPU cores")
+            second.append("unified memory")
+            if card is not None and card.renderer_pct is not None:
+                second.append(f"renderer {card.renderer_pct:.0f}%")
+            if card is not None and card.tiler_pct is not None:
+                second.append(f"tiler {card.tiler_pct:.0f}%")
+            second.append("IOReport")
 
         lines = ["  ·  ".join(str(part) for part in first)]
         if second:
@@ -627,12 +799,24 @@ class GpuView:
 
     # -- single-GPU layout: card summary + process table -------------------
 
-    def _process_layout(self, inner: int, has_model: bool = False) -> tuple:
-        widths = {"pid": 7, "card": 5, "user": 9, "gpu": 6, "mem": 7, "model": 18}
+    def _process_layout(
+        self, inner: int, has_model: bool = False, has_shared: bool = False
+    ) -> tuple:
+        widths = {
+            "pid": 7,
+            "card": 5,
+            "user": 9,
+            "gpu": 6,
+            "mem": 7,
+            "shared": 7,
+            "model": 18,
+        }
         columns = ["pid", "name", "card", "user", "gpu", "mem"]
+        if has_shared:
+            columns.append("shared")
         if has_model:
             columns.append("model")
-        for key in ("model", "mem", "user", "card"):
+        for key in ("model", "shared", "mem", "user", "card"):
             if key not in columns:
                 continue
             fixed = sum(widths[k] for k in columns if k != "name") + len(columns) - 1
@@ -654,10 +838,12 @@ class GpuView:
         return " ".join(cells)
 
     def _process_row(self, row: ProcessRow, columns: list, widths: dict) -> str:
-        if row.gpu_mem_mb is not None:
-            memory = _format_mem(int(row.gpu_mem_mb * 1024 * 1024))
-        else:
-            memory = _format_mem(row.mem_bytes)
+        memory = _memory_text(_gpu_memory_mb(row))
+        shared = (
+            _memory_text(row.gpu_shared_mb)
+            if row.gpu_mem_mb is not None and row.gpu_shared_mb is not None
+            else "-"
+        )
         values = {
             "pid": str(row.pid),
             "name": row.name,
@@ -665,6 +851,7 @@ class GpuView:
             "card": row.gpu_card or "-",
             "gpu": f"{row.gpu_pct:.1f}" if row.util_known else "—",
             "mem": memory,
+            "shared": shared,
             "model": row.model or "-",
         }
         return " ".join(
@@ -692,7 +879,11 @@ class GpuView:
         proc_top = top + cards_height
         title = f" processes by GPU {len(rows)} "
         has_model = any(getattr(row, "model", None) for row in rows)
-        columns, widths = self._process_layout(inner, has_model)
+        has_shared = any(
+            row.gpu_mem_mb is not None and row.gpu_shared_mb is not None
+            for row in rows
+        )
+        columns, widths = self._process_layout(inner, has_model, has_shared)
         out += [
             self._move(proc_top, 0),
             accent,

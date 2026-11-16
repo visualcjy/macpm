@@ -305,3 +305,348 @@ class PrimaryTests(unittest.TestCase):
         ]
 
         self.assertEqual(GpuMonitor.primary(samples).index, 0)
+
+
+# -- DRM memory attribution ------------------------------------------------
+
+
+def amd_fdinfo(
+    pdev="0000:01:00.0",
+    vram_kib=0,
+    gtt_kib=0,
+    shared_vram=0,
+    shared_gtt=0,
+    client=1,
+    gfx_ns=0,
+    capacity=True,
+):
+    text = (
+        "drm-driver:\tamdgpu\n"
+        f"drm-client-id:\t{client}\n"
+        f"drm-pdev:\t{pdev}\n"
+        f"drm-resident-vram:\t{vram_kib} KiB\n"
+        f"drm-shared-vram:\t{shared_vram} KiB\n"
+        f"drm-resident-gtt:\t{gtt_kib} KiB\n"
+        f"drm-shared-gtt:\t{shared_gtt} KiB\n"
+        "drm-resident-system:\t0 KiB\n"
+        f"drm-engine-gfx:\t{gfx_ns} ns\n"
+    )
+    if capacity:
+        text += "drm-engine-capacity-video:\t2\n"
+    return text
+
+
+def write_client(root, pid, fd, target, fdinfo):
+    linux_fixtures._write(root, f"proc/{pid}/comm", "worker\n")
+    linux_fixtures._link(root, f"proc/{pid}/fd/{fd}", target)
+    linux_fixtures._write(root, f"proc/{pid}/fdinfo/{fd}", fdinfo)
+
+
+class FdinfoMemoryTests(unittest.TestCase):
+    def test_amdgpu_memory_and_engines_are_parsed(self):
+        from macpm.linux_backend.proc import parse_fdinfo
+
+        client = parse_fdinfo(
+            amd_fdinfo(vram_kib=2 * 1024 * 1024, gtt_kib=1024 * 1024, gfx_ns=1234)
+        )
+
+        self.assertEqual(client["driver"], "amdgpu")
+        self.assertEqual(client["pdev"], "0000:01:00.0")
+        self.assertEqual(client["vram"], 2 * 1024 ** 3)
+        self.assertEqual(client["gtt"], 1024 ** 3)
+        self.assertEqual(client["shared"], 0)
+        self.assertEqual(client["engines"], {"render": 1234})
+
+    def test_engine_capacity_is_not_an_engine(self):
+        from macpm.linux_backend.proc import parse_fdinfo
+
+        client = parse_fdinfo(amd_fdinfo())
+
+        self.assertNotIn("capacity-video", client["engines"])
+
+    def test_missing_shared_counter_keeps_the_gate_closed(self):
+        from macpm.linux_backend.proc import parse_fdinfo
+
+        text = amd_fdinfo().replace("drm-shared-gtt:\t0 KiB\n", "")
+        client = parse_fdinfo(text)
+
+        self.assertIsNone(client["shared"])
+
+    def test_integrated_gpu_has_no_local_memory(self):
+        from macpm.linux_backend.proc import parse_fdinfo
+
+        client = parse_fdinfo(
+            "drm-driver:\ti915\n"
+            "drm-client-id:\t3\n"
+            "drm-pdev:\t0000:00:02.0\n"
+            "drm-resident-system0:\t2048 KiB\n"
+            "drm-shared-system0:\t0 KiB\n"
+            "drm-resident-stolen-system0:\t512 KiB\n"
+            "drm-engine-render:\t10 ns\n"
+        )
+
+        self.assertIsNone(client["vram"])
+        self.assertEqual(client["gtt"], (2048 + 512) * 1024)
+        self.assertEqual(client["shared"], 0)
+
+    def test_amd_resident_system_is_not_charged_as_gpu_memory(self):
+        from macpm.linux_backend.proc import parse_fdinfo
+
+        client = parse_fdinfo(
+            amd_fdinfo(vram_kib=1024).replace(
+                "drm-resident-system:\t0 KiB", "drm-resident-system:\t4096 KiB"
+            )
+        )
+
+        self.assertEqual(client["vram"], 1024 * 1024)
+        self.assertEqual(client["gtt"], 0)
+
+
+class AttributionTests(unittest.TestCase):
+    """The private-client gate: charge bytes only when the kernel proves them."""
+
+    def _scan(self, clients, partial=False, unreadable=None):
+        from macpm.linux_backend.proc import DrmScan
+
+        return DrmScan(list(clients), partial=partial, unreadable=unreadable or set())
+
+    def _client(self, pid=111, client_id="1", vram=2048, gtt=512, shared=0,
+                render_node=True, pdev="0000:01:00.0"):
+        from macpm.linux_backend.proc import DrmClient
+
+        return DrmClient(
+            pid=pid, client_id=client_id, pdev=pdev, driver="amdgpu",
+            render_node=render_node, vram=vram, gtt=gtt, shared=shared,
+            engines={"render": 10},
+        )
+
+    def test_private_client_is_charged(self):
+        from macpm.linux_backend.proc import attribute_drm_clients
+
+        record = attribute_drm_clients(self._scan([self._client()]), "0000:01:00.0")[111]
+
+        self.assertEqual(record["vram_bytes"], 2048)
+        self.assertEqual(record["gtt_bytes"], 512)
+        self.assertEqual(record["reason"], "")
+
+    def test_integrated_gpu_charges_its_gtt(self):
+        from macpm.linux_backend.proc import attribute_drm_clients
+
+        client = self._client(vram=None, gtt=4096)
+        record = attribute_drm_clients(self._scan([client]), "")[111]
+
+        self.assertIsNone(record["vram_bytes"])
+        self.assertEqual(record["gtt_bytes"], 4096)
+        self.assertEqual(record["reason"], "")
+
+    def test_shared_buffers_are_not_charged(self):
+        from macpm.linux_backend.proc import REASON_SHARED_BUFFERS, attribute_drm_clients
+
+        record = attribute_drm_clients(
+            self._scan([self._client(shared=4096)]), "0000:01:00.0"
+        )[111]
+
+        self.assertIsNone(record["vram_bytes"])
+        self.assertEqual(record["reason"], REASON_SHARED_BUFFERS)
+
+    def test_shared_client_is_not_charged(self):
+        from macpm.linux_backend.proc import REASON_SHARED_CLIENT, attribute_drm_clients
+
+        scan = self._scan([self._client(pid=111), self._client(pid=222)])
+        records = attribute_drm_clients(scan, "0000:01:00.0")
+
+        self.assertEqual(records[111]["reason"], REASON_SHARED_CLIENT)
+        self.assertEqual(records[222]["reason"], REASON_SHARED_CLIENT)
+
+    def test_primary_node_is_not_charged(self):
+        from macpm.linux_backend.proc import REASON_PRIMARY, attribute_drm_clients
+
+        record = attribute_drm_clients(
+            self._scan([self._client(render_node=False)]), "0000:01:00.0"
+        )[111]
+
+        self.assertEqual(record["reason"], REASON_PRIMARY)
+
+    def test_unknown_shared_counter_is_legacy(self):
+        from macpm.linux_backend.proc import REASON_LEGACY, attribute_drm_clients
+
+        record = attribute_drm_clients(
+            self._scan([self._client(shared=None)]), "0000:01:00.0"
+        )[111]
+
+        self.assertEqual(record["reason"], REASON_LEGACY)
+
+    def test_partial_scan_is_not_charged(self):
+        from macpm.linux_backend.proc import REASON_PARTIAL, attribute_drm_clients
+
+        record = attribute_drm_clients(
+            self._scan([self._client()], partial=True), "0000:01:00.0"
+        )[111]
+
+        self.assertEqual(record["reason"], REASON_PARTIAL)
+
+    def test_unreadable_fds_are_not_charged(self):
+        from macpm.linux_backend.proc import REASON_INCOMPLETE, attribute_drm_clients
+
+        record = attribute_drm_clients(
+            self._scan([self._client()], unreadable={111}), "0000:01:00.0"
+        )[111]
+
+        self.assertEqual(record["reason"], REASON_INCOMPLETE)
+
+    def test_other_cards_clients_are_ignored(self):
+        from macpm.linux_backend.proc import attribute_drm_clients
+
+        scan = self._scan(
+            [self._client(pid=111), self._client(pid=222, client_id="2", pdev="0000:02:00.0")]
+        )
+        records = attribute_drm_clients(scan, "0000:01:00.0")
+
+        self.assertIn(111, records)
+        self.assertNotIn(222, records)
+
+
+class DrmCardAttributionTests(unittest.TestCase):
+    def setUp(self):
+        self.root = tempfile.mkdtemp(prefix="macpm-gpu-")
+        linux_fixtures.build(self.root, "empty")
+        linux_fixtures.add_card(self.root, 0, vram=(1024.0, 8192.0))
+        linux_fixtures.add_card(self.root, 1, vram=(2048.0, 8192.0))
+        self.sys = SysRoot(self.root)
+
+    def tearDown(self):
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def test_processes_land_on_the_card_their_client_belongs_to(self):
+        write_client(
+            self.root, 111, 3, "/dev/dri/renderD128",
+            amd_fdinfo("0000:01:00.0", vram_kib=2 * 1024 * 1024, gfx_ns=1),
+        )
+        write_client(
+            self.root, 222, 4, "/dev/dri/renderD129",
+            amd_fdinfo("0000:02:00.0", vram_kib=4 * 1024 * 1024, gfx_ns=1, client=2),
+        )
+        monitor = GpuMonitor.detect(self.sys)
+
+        details = monitor.process_details()
+
+        self.assertEqual(details[111]["cards"], [0])
+        self.assertEqual(details[111]["vram_bytes"], 2 * 1024 ** 3)
+        self.assertEqual(details[222]["cards"], [1])
+        self.assertEqual(details[222]["vram_bytes"], 4 * 1024 ** 3)
+
+    def test_a_process_on_two_cards_keeps_both(self):
+        write_client(
+            self.root, 111, 3, "/dev/dri/renderD128",
+            amd_fdinfo("0000:01:00.0", vram_kib=1024 * 1024, gfx_ns=1),
+        )
+        write_client(
+            self.root, 111, 4, "/dev/dri/renderD128",
+            amd_fdinfo("0000:02:00.0", vram_kib=2 * 1024 * 1024, gfx_ns=9, client=2),
+        )
+        monitor = GpuMonitor.detect(self.sys)
+
+        details = monitor.process_details()
+
+        self.assertEqual(details[111]["cards"], [0, 1])
+        self.assertEqual(details[111]["vram_bytes"], 3 * 1024 ** 3)
+        # One row, busiest card wins: 9 ns beats 1 ns.
+        self.assertEqual(monitor.per_process()[111], 9)
+
+    def test_client_held_by_two_processes_is_unattributed(self):
+        write_client(
+            self.root, 111, 3, "/dev/dri/renderD128",
+            amd_fdinfo("0000:01:00.0", vram_kib=1024, client=7),
+        )
+        write_client(
+            self.root, 222, 5, "/dev/dri/renderD128",
+            amd_fdinfo("0000:01:00.0", vram_kib=1024, client=7),
+        )
+        monitor = GpuMonitor.detect(self.sys)
+
+        details = monitor.process_details()
+
+        self.assertEqual(details[111]["reason"], "shared_client")
+        self.assertIsNone(details[111]["vram_bytes"])
+        self.assertIsNone(details[222]["vram_bytes"])
+
+    def test_card_node_client_is_unattributed(self):
+        write_client(
+            self.root, 111, 3, "/dev/dri/card0",
+            amd_fdinfo("0000:01:00.0", vram_kib=1024),
+        )
+        monitor = GpuMonitor.detect(self.sys)
+
+        self.assertEqual(monitor.process_details()[111]["reason"], "primary")
+
+    def test_samples_walk_fdinfo_once_for_every_card(self):
+        from macpm.linux_backend import gpu as module
+
+        write_client(
+            self.root, 111, 3, "/dev/dri/renderD128",
+            amd_fdinfo("0000:01:00.0", gfx_ns=1),
+        )
+        calls = []
+        real = module.scan_drm
+
+        def counting(sysroot, budget=0.75):
+            calls.append(sysroot)
+            return real(sysroot, budget=budget)
+
+        with mock.patch.object(module, "scan_drm", side_effect=counting):
+            monitor = GpuMonitor.detect(self.sys)
+            monitor.samples(1.0)
+
+        self.assertEqual(len(calls), 1)
+
+
+class IntelCardSplitTests(unittest.TestCase):
+    """drm-pdev decides which card a client's engine time belongs to."""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp(prefix="macpm-gpu-")
+        linux_fixtures.build(self.root, "empty")
+        for index in range(2):
+            linux_fixtures.add_card(self.root, index, driver="i915", vram=None)
+        self.sys = SysRoot(self.root)
+        write_client(
+            self.root, 111, 3, "/dev/dri/renderD128",
+            "drm-driver:\ti915\ndrm-client-id:\t1\n"
+            "drm-pdev:\t0000:01:00.0\ndrm-engine-render:\t1000000000 ns\n",
+        )
+
+    def tearDown(self):
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def test_each_card_reads_its_own_clients(self):
+        monitor = GpuMonitor.detect(self.sys)
+        for backend in monitor.backends:
+            backend.scan_interval = 0.0
+        monitor.samples(1.0)
+        write_client(
+            self.root, 111, 3, "/dev/dri/renderD128",
+            "drm-driver:\ti915\ndrm-client-id:\t1\n"
+            "drm-pdev:\t0000:01:00.0\ndrm-engine-render:\t1500000000 ns\n",
+        )
+
+        samples = monitor.samples(1.0)
+
+        self.assertEqual(samples[0].busy_pct, 50.0)
+        self.assertEqual(samples[1].busy_pct, 0.0)
+
+    def test_without_pdev_neither_card_claims_the_aggregate(self):
+        for index in range(2):
+            linux_fixtures._write(
+                self.root, f"sys/class/drm/card{index}/device/uevent",
+                "DRIVER=i915\n",
+            )
+        write_client(
+            self.root, 111, 3, "/dev/dri/renderD128",
+            "drm-driver:\ti915\ndrm-client-id:\t1\n"
+            "drm-engine-render:\t1000000000 ns\n",
+        )
+        monitor = GpuMonitor.detect(self.sys)
+
+        samples = monitor.samples(1.0)
+
+        self.assertEqual([sample.busy_pct for sample in samples], [None, None])

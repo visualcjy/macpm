@@ -116,11 +116,19 @@ def add_card(
     power=12.0,
     vram=(2048.0, 8192.0),
     temp=43.0,
+    pdev=None,
 ):
     """Add one DRM card so multi-GPU layouts can be replayed."""
     base = f"sys/class/drm/card{index}/device"
+    if pdev is None:
+        pdev = f"0000:{index + 1:02x}:00.0"
     _link(root, base + "/driver", f"../../../../bus/pci/drivers/{driver}")
     _write(root, base + "/vendor", vendor + "\n")
+    _write(
+        root,
+        base + "/uevent",
+        f"DRIVER={driver}\nPCI_CLASS=30000\nPCI_SLOT_NAME={pdev}\n",
+    )
     if busy is not None:
         _write(root, base + "/gpu_busy_percent", f"{busy}\n")
     if freq:

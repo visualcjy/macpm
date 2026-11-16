@@ -4,6 +4,8 @@ import sys
 import unittest
 from pathlib import Path
 
+from macpm import __version__
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -25,7 +27,7 @@ class CliTests(unittest.TestCase):
     def test_version(self):
         result = self.run_module("--version")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("macpm v3.1.0", result.stdout)
+        self.assertIn(f"macpm v{__version__}", result.stdout)
 
     def test_help(self):
         result = self.run_module("--help")

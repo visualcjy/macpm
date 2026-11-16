@@ -75,6 +75,37 @@ class MacSamplerTests(unittest.TestCase):
         self.assertTrue(sampler.gpu_available)
         self.assertIsInstance(sampler._gpu_times(), dict)
 
+    def test_sample_reports_gpu_memory_out_of_unified_ram(self):
+        sampler = create_sampler(1)
+        try:
+            sampler.prime()
+            sample = sampler.sample()
+        finally:
+            sampler.close()
+
+        gpu = sample["gpu"]
+        self.assertIn("mem_total_mb", gpu)
+        self.assertGreater(gpu["mem_total_mb"], 0)
+        self.assertGreaterEqual(gpu["mem_used_mb"], 0)
+        self.assertGreater(gpu.get("gpu_cores") or 0, 0)
+
+    def test_sample_reports_ane_residency(self):
+        import platform
+
+        sampler = create_sampler(1)
+        try:
+            sampler.prime()
+            sample = sampler.sample()
+        finally:
+            sampler.close()
+
+        usage = sample["processor"].get("ane_usage")
+        if platform.machine() == "arm64":
+            self.assertIsNotNone(usage, "the ANE residency channel should exist")
+        if usage is not None:
+            self.assertGreaterEqual(usage, 0.0)
+            self.assertLessEqual(usage, 100.0)
+
 
 if __name__ == "__main__":
     unittest.main()

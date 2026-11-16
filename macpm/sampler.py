@@ -14,9 +14,11 @@ from typing import Optional
 
 import psutil
 
+from .macos_gpu import physical_memory, read_device_stats
 from .metrics import (
     ENERGY_GRACE_SAMPLES,
     ENERGY_TO_J,
+    ane_usage,
     calc_freq,
     energy_available,
     energy_to_joules,
@@ -67,6 +69,10 @@ class Sampler:
         self._cpu_cores = self._subscription("CPU Stats", "CPU Core Performance States")
         self._gpu = self._subscription("GPU Stats", "GPU Performance States")
         self._energy = self._subscription("Energy Model", keep=_keep_energy_channel)
+        # The ANE reports residency per state (Off/Sleep/.../Running); this is
+        # the only rootless utilisation source, because the Energy Model's ANE
+        # power channel stopped updating on recent Apple Silicon.
+        self._ane = self._subscription("ANE")
         self._subscriptions = [
             subscription
             for subscription in (
@@ -74,6 +80,7 @@ class Sampler:
                 self._cpu_cores,
                 self._gpu,
                 self._energy,
+                self._ane,
             )
             if subscription is not None
         ]
@@ -89,7 +96,7 @@ class Sampler:
         # Some macOS builds expose the Energy Model counters but never update
         # them without root.  Track whether a component has ever produced a
         # usable delta so the UI can say n/a instead of a misleading 0 W.
-        self._energy_seen = {"cpu": False, "gpu": False}
+        self._energy_seen = {"cpu": False, "gpu": False, "ane": False}
         self._sample_count = 0
 
         self.prev_time: Optional[float] = None
@@ -155,12 +162,15 @@ class Sampler:
             )
         gpu_joules = self._energy_sum(energy, lambda name: name.endswith("GPU Energy"))
         ane_joules = self._energy_sum(energy, lambda name: name.startswith("ANE"))
+        ane_percent = ane_usage(self._ane.delta() if self._ane is not None else {})
 
         self._sample_count += 1
         if cpu_joules > 0.0:
             self._energy_seen["cpu"] = True
         if gpu_joules > 0.0:
             self._energy_seen["gpu"] = True
+        if ane_joules > 0.0:
+            self._energy_seen["ane"] = True
 
         cpu_joules = _sane_energy(cpu_joules, elapsed, self._power_limits["cpu"])
         gpu_joules = _sane_energy(gpu_joules, elapsed, self._power_limits["gpu"])
@@ -175,6 +185,11 @@ class Sampler:
         total_mj = (cpu_joules + gpu_joules + ane_joules) * energy_scale * 1000.0
 
         gpu_freq, gpu_active = self._gpu_usage(gpu)
+        gpu_payload = {
+            "freq_hz": int(gpu_freq),
+            "idle_ratio": max(0.0, min(1.0, 1.0 - gpu_active)),
+        }
+        gpu_payload.update(self._gpu_device())
 
         return {
             "timestamp": time.time(),
@@ -191,14 +206,43 @@ class Sampler:
                 "gpu_energy_available": _energy_available(
                     self._energy_seen["gpu"], self._sample_count
                 ),
+                "ane_usage": ane_percent,
+                "ane_energy_available": _energy_available(
+                    self._energy_seen["ane"], self._sample_count
+                ),
             },
-            "gpu": {
-                "freq_hz": int(gpu_freq),
-                "idle_ratio": max(0.0, min(1.0, 1.0 - gpu_active)),
-            },
+            "gpu": gpu_payload,
             "disk": self._disk_rates(elapsed),
             "network": self._network_rates(elapsed),
         }
+
+    def _gpu_device(self) -> dict:
+        """GPU memory out of unified RAM, plus the engine split.
+
+        An Apple GPU has no VRAM of its own: ``Alloc system memory`` is what
+        every process's Metal buffers hold, and the total is physical RAM.
+        Missing registry data leaves the keys out, so the view shows ``n/a``
+        rather than a zero.
+        """
+        try:
+            stats = read_device_stats()
+        except Exception:
+            stats = None
+        if not stats:
+            return {}
+        payload = {
+            "name": stats.get("model") or "",
+            "gpu_cores": stats.get("cores"),
+            "renderer_pct": stats.get("renderer_pct"),
+            "tiler_pct": stats.get("tiler_pct"),
+        }
+        allocated = stats.get("allocated_bytes")
+        if allocated is not None:
+            payload["mem_used_mb"] = allocated / (1024.0 * 1024.0)
+            total = physical_memory()
+            if total:
+                payload["mem_total_mb"] = total / (1024.0 * 1024.0)
+        return payload
 
     # -- CPU / GPU ---------------------------------------------------------
 

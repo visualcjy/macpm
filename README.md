@@ -19,6 +19,11 @@ Linux backend.
   GPU INFO box, 10-cell VRAM bars, pagination and the served model name.
   Verified on 16× Iluvatar BI-V150S, 64× Denglin KS58, 8× Techo
   TECO_AICARD_01 and 8× RTX 4090.
+- **Per-process GPU memory on Linux DRM cards**: AMD/Intel `fdinfo` bytes are
+  charged to a process only when the kernel proves they are private, and the
+  card each client belongs to is read from `drm-pdev`; an unprovable row shows
+  `n/a` with a reason instead of a guess.  On macOS the IOAccelerator's
+  allocated GPU memory is shown against unified RAM.
 - **Vendor and NVIDIA backends**: `ixsmi`, `dlsmi`, `teco-smi` and
   `nvidia-smi`, including per-card compute processes and model names.
 
@@ -50,7 +55,7 @@ Network view (press `4` while running):
 - **No sudo required.** `macpm` runs as a normal user process.
 - CPU E/P core utilisation and frequency, plus an optional per-core view
 - GPU utilisation and frequency
-- CPU / GPU / ANE power, rolling average, peaks and throttle state
+- CPU / GPU power, ANE utilisation (residency counters) and ANE power when the rail reports it, rolling average, peaks and throttle state
 - RAM and swap usage
 - CPU/GPU temperature, peak and fan-load panel (SMC, read-only, no root)
 - Disk IOPS/throughput and network throughput
@@ -58,9 +63,11 @@ Network view (press `4` while running):
 - Network view (`4`) with TCP state counts, listening ports, per-process traffic
   and the local/public IP, gateway and city
 - GPU view (`5`) with utilisation, clock, power, VRAM, temperature and the
-  processes using the GPU, ranked by GPU time
-- Key-hint footer in every view; the default view also fills the terminal and
-  shows the network identity in the processor box when there is room
+  processes using the GPU, ranked by GPU time; AMD/Intel cards also show each
+  process's VRAM/GTT and the card it holds
+- Key-hint footer in every view; the default view puts the network identity
+  (interface, CIDR, gateway, public IP and city) on the Network IO box's bottom
+  border, and the key hints are a plain line below it
 - Familiar terminal layout, colours, charts and key bindings from macpm 0.x
 
 ## Install
@@ -138,6 +145,7 @@ requires root and Apple's private entitlements.
 | Per-core load | IOReport `CPU Core Performance States` |
 | GPU load and frequency | IOReport `GPU Stats` / `GPU Performance States` |
 | CPU / GPU / ANE power | IOReport `Energy Model` |
+| ANE utilisation | IOReport `ANE` `status` residency (Running share) |
 | RAM / swap | `psutil` |
 | Disk / network throughput | `psutil` counters |
 | Sockets, listeners, per-process traffic | `nettop` |
@@ -155,7 +163,11 @@ M1–M3 store Hz there, M4+ store kHz.
 
 ## Temperatures and fans
 
-The default view has a **Temps & Fans** box next to the memory gauge.  It shows
+The default view has a **Temps & Fans** box next to the **Memory** box.  The
+Memory box draws one RAM bar and uses the rows below for swap and the macOS
+memory zones (`wired` / `active` / `inactive` / `free`); the processor box and
+this row keep their content height, and any spare rows go to the charts.  The
+Temps & Fans box shows
 the hottest CPU and GPU sensor with their peaks since the last reset (CPU on
 one row, GPU on the next), the current RPM of every fan, and a fan-load bar
 for each fan (current speed as a
@@ -270,9 +282,17 @@ recovered from the launcher's command line (`--served-model-name`, `--model`,
 `--model-path`, `--model-id`) by walking up the parent chain; a single-GPU view
 shows it as a `MODEL` column.
 
+The single-GPU process table has a `GPU MEM` column (dedicated memory, or the
+GTT bytes of an integrated GPU) and, when a card reports them, a `SHARED`
+column for GPU-accessible system memory.  Neither is ever filled from RSS:
+system memory in a GPU-memory column would be a guess, so an unprovable row
+shows `n/a` and the reason stays in the data
+(`shared_client`, `shared_buffers`, `primary`, `legacy`, `partial_scan`,
+`incomplete`).
+
 A single-GPU machine keeps the older layout: card summary on top, process table
 below.  Every view's footer starts with the app name and version
-(`macpm v3.1.0 · q quit …`).
+(`macpm v3.2.0 · q quit …`).
 
 ```text
 ┌ GPU INFO ────────────────────────────────────────────────────────────────────────────────┐
@@ -286,12 +306,12 @@ below.  Every view's footer starts with the app name and version
 │       └ 222 Xorg 2.0G                                                                    │
 │   2 AMD GPU (amdgpu)          ▉▉▉▉▏▏  60% 1100/1750   12.0W  ▉▉▉▉▏▏▏▏▏▏  3.0G/8.0G  46°C │
 │   3 AMD GPU (amdgpu)          ▉▉▉▉▉▏  85% 1200/1750   12.0W  ▉▉▉▉▉▏▏▏▏▏  4.0G/8.0G  49°C │
-└ macpm v3.1.0 · q quit  1-5 view  s sort  ↑/↓ page  Space pause  ←/→ colour ────────────────┘
+└ macpm v3.2.0 · q quit  1-5 view  s sort  ↑/↓ page  Space pause  ←/→ colour ────────────────┘
 ```
 
 | Platform | What fills each row |
 |---|---|
-| macOS | One row: IOReport GPU idle ratio and the Energy Model power; the SMC supplies the temperature.  Memory is unified, so the VRAM cell says `unified`. |
+| macOS | One row: IOReport GPU idle ratio and the Energy Model power; the SMC supplies the temperature.  Memory is unified, so the VRAM cell shows the IOAccelerator's `Alloc system memory` (every process's Metal allocations) out of physical RAM, and the card title says so; the INFO box adds GPU cores and the Renderer/Tiler split.  Each process's `GPU MEM` comes from `footprint`'s `(graphics)` categories.  Without registry data the VRAM cell says `unified`. |
 | Linux (amdgpu) | One row per `cardN`: `gpu_busy_percent`, `pp_dpm_sclk`, hwmon power/temperature, `mem_info_vram_*` |
 | Linux (i915/xe) | One row per card: `gt_cur_freq_mhz` / `tile0/gt0/freq0`, DRM `fdinfo` engine time, hwmon temperature; VRAM only when the driver exposes `lmem_total_bytes` |
 | Linux (NVIDIA) | One row per GPU from a single `nvidia-smi --query-gpu` call: utilisation, SM clock, power, memory, temperature.  Compute processes come from `nvidia-smi --query-compute-apps` (SM% joined from `pmon`).  `nvidia-smi` is found on `PATH`, at `/usr/lib/wsl/lib/nvidia-smi` on WSL, or via `MACPM_NVIDIA_SMI` |
@@ -319,6 +339,12 @@ Notes:
   worker is two hops below `vllm serve`/`sglang.launch_server`, and reading
   `config.json` through `/proc/<pid>/root` can block on a stalled network mount.
   Unknown servers show no name rather than a guess.
+- On macOS, per-process `GPU MEM` is `footprint`'s `(graphics)` dirty bytes
+  (Metal buffers and textures), not RSS.  One call costs ~15 ms, so a
+  background thread measures only the processes on screen: busy ones every 2 s,
+  idle ones every 30 s, with a minute of backoff after three failures, and it
+  stops ~10 s after the view is closed.  Without root `footprint` can only read
+  your own processes; the rest keep `n/a`.
 - The nested process line comes from the vendor's own compute-process list
   (`ixsmi pmon`/`--query-compute-apps`, `dlsmi --query-compute-apps`,
   `teco-smi pmon`) or, on macOS and DRM GPUs, from `fdinfo`/IOAccelerator.  A
@@ -333,9 +359,17 @@ Notes:
   idle card does not read as generation 1.  Consumer cards report `[N/A]` for
   the serial, so their card/die counts are left out instead of guessed; PCIe
   and VBIOS are hidden when the tool reports `N/A`.
-- Intel `fdinfo` counters are machine-wide rather than per card; with more than
-  one Intel GPU the per-card BUSY cell shows `n/a` instead of duplicating the
-  aggregate on every row.
+- Intel `fdinfo` counters are split per card through `drm-pdev`, so several
+  Intel GPUs each report their own work.  An old kernel whose `fdinfo` has no
+  `drm-pdev` cannot tell the cards apart, and the per-card BUSY cell then shows
+  `n/a` instead of duplicating the aggregate on every row.
+- On AMD/Intel DRM cards, per-process memory is charged only when every
+  `drm-shared-*` counter is present and zero, the client was opened through a
+  render node, exactly one visible process holds it, and the fdinfo scan
+  reached the end.  `drm-shared-*` and `drm-resident-*` count by different
+  placements, so their difference is never used as "private" memory; anything
+  unprovable stays `n/a` rather than being guessed.  Other users' processes
+  need root to be inspected, and their bytes show as unattributed.
 - The default view's GPU gauge shows the busiest card and appends `(max of N)`
   when the machine has more than one.
 
@@ -394,17 +428,29 @@ python3 -m macpm.probe
 | Disk I/O, network rate | `/proc/diskstats`, `/proc/net/dev` | ✅ | ✅ |
 | Processes CPU/MEM | `/proc/<pid>` via `psutil` | ✅ all users | ✅ |
 | Per-process GPU% | DRM `fdinfo` `drm-engine-*` | own processes only | ✅ all |
+| Per-process GPU memory | DRM `fdinfo` `drm-resident-*` / `drm-shared-*` | own processes only | ✅ all |
+| GPU memory (device) | amdgpu `mem_info_vram_*`, i915/xe `lmem_total_bytes` | ✅ | ✅ |
 | TCP/UDP counts, listeners | `/proc/net/{tcp,tcp6,udp,udp6}` | ✅ counts, own PIDs | ✅ all PIDs |
 | Per-process traffic | `ss -tanie` `tcp_info` | own processes, TCP only | ✅ all |
 
 **GPU notes.**  `amdgpu` exposes everything.  Intel `i915`/`xe` have no global
 busy counter, so macpm sums every DRM client's engine time from `fdinfo` —
 which needs root to see other processes, otherwise it only shows macpm's own
-GPU work.  NVIDIA uses `nvidia-smi`.  Vendor ARM GPUs and Apple GPU under
-Asahi have no exported counters yet and show `n/a`.
+GPU work.  The same `fdinfo` file carries the client's memory, so AMD and Intel
+cards also get per-process VRAM/GTT; NVIDIA uses `nvidia-smi`, which reports
+memory itself.  Vendor ARM GPUs and Apple GPU under Asahi have no exported
+counters yet and show `n/a`.
 
-**No ANE.**  There is no Linux equivalent of the Apple Neural Engine counter,
-so that gauge is removed on Linux.
+**No ANE on Linux.**  There is no Linux equivalent of the Apple Neural Engine
+counter, so that gauge is removed there.
+
+**ANE usage is residency, not power.**  On recent Apple Silicon the Energy
+Model's ANE power tile stopped updating (it reads 0 W even while the ANE
+runs), so `ANE Usage` comes from the `ANE` group's `status` channel: the share
+of the interval spent in the `Running` state.  Idle is 0 %, a Core ML
+`mlprogram` loop holds it near 100 %.  Watts are only appended when that sample
+actually measured nonzero ANE energy.  `tools/ane_load.py` builds such a loop
+for a manual check (it needs `coremltools`; macpm itself does not).
 
 **Vendor accelerators need a vendor tool.**  Ampere/Intel/AMD GPUs expose
 kernel counters, but many accelerator cards only ship a management CLI and no

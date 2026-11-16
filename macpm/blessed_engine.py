@@ -35,11 +35,12 @@ def _write(out: list, term, row: int, column: int, text: str, color: str) -> Non
 
 def _box(tile, row, col, width, height, out, term, color) -> None:
     title = getattr(tile, "title", "") or ""
+    bottom = getattr(tile, "bottom_title", "") or ""
     line = _fit(f" {title} ", max(0, width - 2)) if title else ""
     out.append(term.move(row, col) + color + _border(width, line) + RESET_FG)
     if height > 1:
         out.append(
-            term.move(row + height - 1, col) + color + _bottom(width, "") + RESET_FG
+            term.move(row + height - 1, col) + color + _bottom(width, bottom) + RESET_FG
         )
     for offset in range(1, max(1, height - 1)):
         out.append(term.move(row + offset, col) + color + "│" + RESET_FG)
@@ -55,12 +56,17 @@ def _heights(tile, total: int) -> list:
     if type(tile).__name__ == "FillVSplit":
         base, extra = divmod(total, items)
         heights = [base] * items
-        if items > 1 and extra:
-            share, remainder = divmod(extra, items - 1)
-            for index in range(1, items):
-                heights[index] += share
-                if index - 1 < remainder:
-                    heights[index] += 1
+        for offset in range(extra):
+            heights[items - 1 - (offset % items)] += 1
+        for index in range(min(2, items)):
+            cap = getattr(tile.items[index], "max_height", 0)
+            if cap:
+                heights[index] = min(heights[index], cap)
+        remaining = total - sum(heights)
+        if remaining > 0:
+            growable = list(range(min(2, items), items)) or [items - 1]
+            for offset in range(remaining):
+                heights[growable[offset % len(growable)]] += 1
         return heights
     minimums = [getattr(item, "min_height", 0) for item in tile.items]
     maximums = [getattr(item, "max_height", 0) for item in tile.items]
@@ -163,8 +169,13 @@ def paint(tile, row, col, width, height, out, term, color) -> None:
                 y += child_height
         else:
             x = col
-            for item, child_width in zip(items, _widths(tile, width)):
-                paint(item, row, x, child_width, height, out, term, color)
+            widths = _widths(tile, width)
+            for index, (item, child_width) in enumerate(zip(items, widths)):
+                # A one-column gutter keeps two adjacent bars from reading as
+                # one long bar.  Bordered panels already have their own frame,
+                # so they stay flush.
+                gutter = 1 if index < len(items) - 1 and not _bordered(item) else 0
+                paint(item, row, x, max(0, child_width - gutter), height, out, term, color)
                 x += child_width
         return
 
@@ -177,6 +188,9 @@ def paint(tile, row, col, width, height, out, term, color) -> None:
         if getattr(tile, "plain", False):
             return
         value = getattr(tile, "value", 0)
+        # Fill every row the layout gave us.  View 2 stretches the E/P usage
+        # gauges on purpose; the boxes with fixed content height (Memory) cap
+        # theirs so this does not repeat a reading there.
         for line in range(start, height):
             _write(out, term, row + line, col, _hbar(value, width), color)
     elif name == "VGauge":
@@ -222,7 +236,7 @@ def paint(tile, row, col, width, height, out, term, color) -> None:
 
 
 def render_tiles(tile, term, color) -> None:
-    """Paint ``tile`` over the full terminal."""
+    """Paint ``tile`` over the terminal, leaving the footer row free."""
     out: list = []
     paint(tile, 0, 0, term.width, max(1, term.height - 1), out, term, color)
     print("".join(out), end="", flush=True)

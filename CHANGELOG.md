@@ -1,5 +1,70 @@
 # Changelog
 
+## 3.2.0 — 2026-11-16
+
+### Added
+
+- Linux AMD/Intel cards report per-process GPU memory from DRM `fdinfo`
+  (`drm-resident-vram`/`gtt`/`local0`/`system0` plus `drm-shared-*`).  Bytes are
+  charged only when the client is provably private: one visible holder, opened
+  through a render node, every shared counter present and zero, and a complete
+  scan.  Anything else shows `n/a` with a reason (`shared_client`,
+  `shared_buffers`, `primary`, `legacy`, `partial_scan`, `incomplete`), so a
+  shared buffer is never presented as private memory.
+- The GPU view's single-GPU table gained `GPU MEM` and (when the card reports
+  GTT) `SHARED` columns, and the per-card process line shows the memory of the
+  card's own processes.
+- macOS: the GPU view reads the IOAccelerator's `PerformanceStatistics` through
+  the existing IOKit bindings, so the VRAM cell shows `Alloc system memory` out
+  of unified RAM and the INFO box adds GPU cores plus the Renderer/Tiler split.
+  An integrated GPU's `drm-resident-system0` bytes are charged as that
+  process's GPU memory rather than as spill.
+- macOS: per-process `GPU MEM` comes from `footprint`'s `(graphics)`
+  categories, so the column agrees with the device number instead of showing
+  `n/a` (or RSS).  A background thread measures only the processes on screen
+  (~15 ms each, busy every 2 s, idle every 30 s, minute-long backoff after
+  three failures, stops ~10 s after the view is closed); other users' processes
+  need root and stay `n/a`.
+- `tools/ane_load.py`: a manual ANE load (Core ML `mlprogram`) that prints the
+  same residency figure as the gauge, for checking it without root.
+
+### Changed
+
+- DRM clients are keyed by `drm-pdev`, so a process is attributed to the card
+  it actually holds; on a multi-AMD host every process used to land on card 0.
+- The GPU view never fills its memory column from RSS.  System memory in a
+  GPU-memory column is a guess, so an unknown figure stays `n/a`; RSS keeps its
+  own `MEM` column in the process view.
+- `GpuMonitor.samples()` takes one `fdinfo` walk per refresh and hands it to
+  every card; an 8-card host used to walk every process's fd table once per
+  card plus once more for the process ranking.
+- Intel `i915`/`xe` report per-card utilisation through `drm-pdev`; only an old
+  kernel without `drm-pdev` falls back to `n/a` on multi-GPU hosts.
+- The Linux process ranking no longer drops GPU-active but CPU-idle processes
+  (an inference worker between requests) just because they are outside the
+  top 60 by CPU time.
+- The default view's network identity (interface/CIDR, gateway, public IP and
+  city) sits on the Network IO box's bottom border and keeps the last non-empty
+  text; the key-hint footer is a plain line below it.  The previous spare-row
+  slot only existed at some terminal heights, and a processor-box title was
+  repainted over.
+- The Memory box draws a single RAM bar and gives the rows below it to swap and
+  the macOS memory zones, instead of repeating the same bar on every spare row.
+  The processor box and the Memory/Temps row keep a fixed content height, and
+  surplus rows go to the charts; a one-column gutter separates side-by-side
+  usage bars.
+
+### Fixed
+
+- The default view's `ANE Usage` gauge always read 0 %: it was derived from the
+  Energy Model's ANE power counter, which reports 0 on recent Apple Silicon
+  even while the ANE runs.  It now uses the `ANE` IOReport channel's `status`
+  residency (the share of the interval spent `Running`), which reads 0 % idle
+  and near 100 % under a Core ML loop; the watts suffix appears only when a
+  sample actually measured ANE energy.
+- `drm-engine-capacity-*` lines are no longer parsed as engine time, so a
+  capacity value cannot pollute the per-process GPU percentage.
+
 ## 3.1.0 — 2026-11-15
 
 ### Changed
