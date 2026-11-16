@@ -345,6 +345,11 @@ Notes:
   idle ones every 30 s, with a minute of backoff after three failures, and it
   stops ~10 s after the view is closed.  Without root `footprint` can only read
   your own processes; the rest keep `n/a`.
+- On macOS, the table keeps a process listed while it holds GPU memory even
+  when its `GPU%` is momentarily 0 (a browser between frames), and the `CARD`
+  column is omitted: a Mac has one integrated GPU, so it would only ever show
+  `-`.  On Linux multi-GPU hosts `CARD` still shows the index/range the process
+  holds.
 - The nested process line comes from the vendor's own compute-process list
   (`ixsmi pmon`/`--query-compute-apps`, `dlsmi --query-compute-apps`,
   `teco-smi pmon`) or, on macOS and DRM GPUs, from `fdinfo`/IOAccelerator.  A

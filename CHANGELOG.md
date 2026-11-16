@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- macOS GPU view: a process stays listed while it holds GPU memory, even when
+  its `GPU%` is momentarily 0 (a browser between frames), instead of flickering
+  in and out of the table.  The `CARD` column is hidden on macOS, where a
+  single integrated GPU would make every row read `-`.
+- The macOS `footprint` poller now targets only processes that actually hold a
+  Metal client (from the IORegistry), and rotates the idle targets beyond its
+  32-target cap, so every GPU app is eventually measured instead of the
+  lowest-PID daemons taking the slots.
+
 ## 3.2.0 — 2026-11-16
 
 ### Added

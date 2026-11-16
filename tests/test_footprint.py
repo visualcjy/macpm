@@ -225,6 +225,17 @@ class PollerTests(unittest.TestCase):
         self.assertEqual(len(calls), 4)
         self.assertEqual(poller.get(111), 4096)
 
+    def test_idle_targets_rotate_beyond_the_cap(self):
+        calls = []
+        poller = self._poller(lambda pid: (calls.append(pid), 1)[1])
+        poller.MAX_TARGETS = 2
+        poller.set_targets([(1, False), (2, False), (3, False), (4, False)])
+
+        poller.poll_once()
+        poller.poll_once()
+
+        self.assertEqual(sorted(set(calls)), [1, 2, 3, 4])
+
     def test_dropping_a_target_forgets_its_reading(self):
         poller = self._poller(lambda pid: 1)
         poller.set_targets([(111, True)])
@@ -281,6 +292,25 @@ class AttachTests(unittest.TestCase):
 
         self.assertIsNone(rows[0].gpu_mem_mb)
         self.assertEqual(rows[0].gpu_note, "footprint")
+
+    def test_targets_only_include_processes_with_a_gpu_client(self):
+        from macpm.processes import ProcessRow
+
+        seen = []
+        view = self._view(types.SimpleNamespace(
+            set_targets=lambda targets: seen.extend(targets),
+            get=lambda pid: None,
+            close=lambda: None,
+        ))
+        view.sampler = types.SimpleNamespace(gpu_pids={1})
+        rows = [
+            ProcessRow(1, "chrome", "u", 0.0, 0, 0.0),
+            ProcessRow(2, "no-client", "u", 0.0, 0, 0.0),
+        ]
+
+        view._attach_footprint(rows)
+
+        self.assertEqual(seen, [(1, False)])
 
     def test_targets_skip_rows_that_already_have_memory(self):
         from macpm.processes import ProcessRow

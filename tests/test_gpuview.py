@@ -489,6 +489,41 @@ MAC_SAMPLE_WITH_MEMORY = dict(
 )
 
 
+class MacCardColumnTests(unittest.TestCase):
+    def test_macos_hides_the_card_column(self):
+        rows = [ProcessRow(111, "blender", "alice", 0.0, 0, 42.5, gpu_card="0")]
+
+        output = render(make_view(rows, caps=Capabilities()), sample_data=MAC_SAMPLE)
+
+        self.assertNotIn("CARD", output)
+        self.assertIn("GPU%", output)
+
+    def test_linux_keeps_the_card_column(self):
+        rows = [ProcessRow(111, "worker", "root", 0.0, 0, 42.5, gpu_card="0")]
+
+        output = render(make_view(rows), sample_data=SINGLE_SAMPLE)
+
+        self.assertIn("CARD", output)
+
+
+class VisibilityTests(unittest.TestCase):
+    def test_zero_utilisation_with_gpu_memory_stays_visible(self):
+        rows = [
+            ProcessRow(1, "chrome", "u", 0.0, 0, 0.0, gpu_mem_mb=200.0),
+            ProcessRow(2, "tiny", "u", 0.0, 0, 0.0, gpu_mem_mb=4.0),
+        ]
+
+        self.assertEqual([row.pid for row in make_view(rows)._visible_rows()], [1])
+
+    def test_busy_rows_still_come_first(self):
+        rows = [
+            ProcessRow(1, "idle-big", "u", 0.0, 0, 0.0, gpu_mem_mb=200.0),
+            ProcessRow(2, "busy", "u", 0.0, 0, 30.0),
+        ]
+
+        self.assertEqual([row.pid for row in make_view(rows)._visible_rows()], [2, 1])
+
+
 class GpuMemoryCellTests(unittest.TestCase):
     def test_unknown_gpu_memory_renders_na_not_rss(self):
         row = ProcessRow(111, "blender", "alice", 0.0, 3 * 1024 ** 3, 42.5,

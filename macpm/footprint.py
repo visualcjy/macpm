@@ -147,6 +147,9 @@ class FootprintPoller:
         self._entries: dict = {}
         self._targets: dict = {}
         self._targets_at = 0.0
+        # Rotates the idle targets when there are more of them than
+        # MAX_TARGETS, so a process beyond the cap still gets measured.
+        self._rotation = 0
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -186,9 +189,18 @@ class FootprintPoller:
 
     def poll_once(self) -> None:
         with self._lock:
-            targets = sorted(
+            items = sorted(
                 self._targets.items(), key=lambda item: (not item[1], item[0])
-            )[: self.MAX_TARGETS]
+            )
+        busy = [item for item in items if item[1]]
+        idle = [item for item in items if not item[1]]
+        if len(items) > self.MAX_TARGETS and idle:
+            slots = max(0, self.MAX_TARGETS - len(busy))
+            if slots:
+                start = self._rotation % len(idle)
+                idle = idle[start:] + idle[:start]
+                self._rotation = (start + slots) % len(idle)
+        targets = (busy + idle)[: self.MAX_TARGETS]
         now = self._clock()
         for pid, busy in targets:
             if self._stop.is_set():

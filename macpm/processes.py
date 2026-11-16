@@ -192,6 +192,10 @@ class ProcessSampler:
         except Exception:
             self._gpu_reader = None
         self.gpu_available = self._gpu_reader is not None
+        # PIDs that reported a GPU client in the latest sample.  The GPU view
+        # uses this to decide which processes are worth a footprint measurement
+        # instead of scanning every process on the machine.
+        self.gpu_pids: set = set()
         self.error: Optional[str] = None
 
     def _gpu_times(self):
@@ -336,6 +340,7 @@ class ProcessSampler:
         self._prev_cpu = prev_cpu
         self._prev_gpu = gpu_times or {}
         self._prev_time = now
+        self.gpu_pids = set(gpu_times or {})
         return rows
 
 
@@ -431,6 +436,7 @@ class ProcessSampler:
         self._prev_cpu = prev_cpu
         self._prev_gpu = gpu_times or {}
         self._prev_time = now
+        self.gpu_pids = set(gpu_times or {})
         return rows
 
 

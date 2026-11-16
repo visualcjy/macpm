@@ -465,10 +465,13 @@ class GpuView:
         source = getattr(self, "_memory_source", None)
         if source is None or not rows:
             return rows
+        gpu_pids = getattr(getattr(self, "sampler", None), "gpu_pids", None)
         targets = [
             (row.pid, row.gpu_pct > 0.5)
             for row in rows
-            if row.gpu_mem_mb is None and row.gpu_card is None
+            if row.gpu_mem_mb is None
+            and row.gpu_card is None
+            and (gpu_pids is None or row.pid in gpu_pids)
         ]
         try:
             source.set_targets(targets)
@@ -530,12 +533,20 @@ class GpuView:
             rows = [
                 row
                 for row in self.rows
-                if row.gpu_card is not None or not row.util_known or row.gpu_pct > 0.05
+                if row.gpu_card is not None
+                or not row.util_known
+                or row.gpu_pct > 0.05
+                # A process can hold GPU memory while it is momentarily idle
+                # (a browser between frames).  Keep it listed, like the
+                # activity-based rows, instead of making the table flicker.
+                or (row.gpu_mem_mb or 0.0) >= 16.0
+                or (row.gpu_shared_mb or 0.0) >= 16.0
             ]
             key = {
                 "gpu": lambda row: (
                     -_card_start(row.gpu_card),
                     row.gpu_pct,
+                    row.gpu_mem_mb or 0.0,
                     -row.pid,
                 ),
                 "pid": lambda row: row.pid,
@@ -812,6 +823,10 @@ class GpuView:
             "model": 18,
         }
         columns = ["pid", "name", "card", "user", "gpu", "mem"]
+        if getattr(self.caps, "platform", "") == "macos":
+            # A Mac has one integrated GPU; a CARD column of dashes is noise.
+            columns.remove("card")
+            widths.pop("card")
         if has_shared:
             columns.append("shared")
         if has_model:
