@@ -18,6 +18,10 @@
   short bar with compact numbers, then to numbers only, and is dropped only
   below ~74 columns.  Previously the whole column disappeared under 86
   columns.
+- The card table sizes `NAME` to the longest card plus padding instead of
+  letting it absorb the whole spare width; the surplus goes to the VRAM bar
+  (`BUSY` on tables too narrow for VRAM).  `BUSY` is left-aligned so its bar
+  starts directly after the name.
 
 ## 3.2.0 — 2026-11-16
 

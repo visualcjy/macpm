@@ -520,6 +520,34 @@ class NarrowCardTests(unittest.TestCase):
         self.assertIn("  2.0G/8.0G", cell)
 
 
+class CardNameWidthTests(unittest.TestCase):
+    def test_short_name_does_not_stretch(self):
+        view = make_view([])
+
+        columns, widths = view._card_layout(116, name_cap=14)
+
+        self.assertEqual(widths["name"], 14)
+        self.assertGreater(widths["vram"], 22)
+
+    def test_row_still_fills_the_box(self):
+        from macpm.tui import _text_width
+
+        view = make_view([])
+        cards = build_cards(SINGLE_SAMPLE, linux_caps())
+        columns, widths = view._card_layout(116, name_cap=14)
+
+        row = view._card_row(cards[0], columns, widths)
+
+        self.assertEqual(_text_width(row), 116)
+
+    def test_no_cap_keeps_the_old_flexible_name(self):
+        view = make_view([])
+
+        _, widths = view._card_layout(116)
+
+        self.assertGreater(widths["name"], 20)
+
+
 class CardsTitleTests(unittest.TestCase):
     def test_single_card_title_has_no_power_total(self):
         view = make_view([])

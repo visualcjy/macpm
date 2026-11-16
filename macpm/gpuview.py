@@ -65,6 +65,9 @@ _CARD_COLUMNS = (
 _CARD_HEADERS = {key: header for key, header, _ in _CARD_COLUMNS}
 _CARD_HEADERS["name"] = "NAME"
 _CARD_MIN_NAME = 18
+# The card name is sized to the longest card plus padding, not to all the
+# spare width; the surplus goes to the BUSY/VRAM bars.
+_CARD_NAME_MAX = 30
 
 
 @dataclass
@@ -569,7 +572,9 @@ class GpuView:
 
     # -- card table --------------------------------------------------------
 
-    def _card_layout(self, inner: int, multi: bool = False) -> tuple:
+    def _card_layout(
+        self, inner: int, multi: bool = False, name_cap: Optional[int] = None
+    ) -> tuple:
         def layout(vram_width: int) -> tuple:
             widths = {key: width for key, _, width in _CARD_COLUMNS}
             widths["vram"] = vram_width
@@ -589,7 +594,18 @@ class GpuView:
                 columns.remove(key)
             fixed = sum(widths[column] for column in columns if column != "name")
             fixed += len(columns) - 1
-            widths["name"] = max(6, inner - fixed)
+            desired = inner - fixed
+            name_width = desired if name_cap is None else min(desired, name_cap)
+            surplus = max(0, desired - name_width)
+            if name_cap is not None and surplus:
+                # Spend the rest of the row on the bars instead of one
+                # oversized NAME column; prefer VRAM, which is the point of
+                # this view, and fall back to BUSY on very narrow tables.
+                growing = [key for key in ("vram", "busy") if key in columns]
+                if growing:
+                    for offset in range(surplus):
+                        widths[growing[offset % len(growing)]] += 1
+            widths["name"] = max(6, name_width)
             return columns, widths
 
         # Memory is the point of this view, so shrink the VRAM cell (drop the
@@ -602,15 +618,19 @@ class GpuView:
 
     def _card_header(self, columns: list, widths: dict) -> str:
         return " ".join(
-            _pad(_CARD_HEADERS[key], widths[key], right=key != "name")
+            _pad(_CARD_HEADERS[key], widths[key],
+                 right=key not in ("name", "busy"))
             for key in columns
         )
 
-    def _card_cells(self, card: GpuDetails, vram_width: int = 22) -> dict:
+    def _card_cells(
+        self, card: GpuDetails, vram_width: int = 22, busy_width: int = 18
+    ) -> dict:
+        busy_cells = max(6, busy_width - 12)
         if card.busy_pct is None:
-            busy = _pad("n/a", 18, right=True)
+            busy = _pad("n/a", busy_width, right=True)
         else:
-            busy = _bar(card.busy_pct, 6) + f" {card.busy_pct:>3.0f}%"
+            busy = _bar(card.busy_pct, busy_cells) + f" {card.busy_pct:>3.0f}%"
             if card.busy_recent is not None and card.busy_recent > card.busy_pct + 1:
                 busy += f" \N{UPWARDS ARROW}{card.busy_recent:.0f}%"
         if card.freq_mhz is None:
@@ -621,17 +641,17 @@ class GpuView:
             clock = f"{card.freq_mhz:.0f} MHz"
         if card.mem_total_mb:
             if vram_width >= 20:
-                vram = (
-                    f"{_bar(card.mem_pct or 0.0, 10)} "
-                    f"{_format_mb(card.mem_used_mb):>5}/{_format_mb(card.mem_total_mb)}"
+                text = (
+                    f"{_format_mb(card.mem_used_mb):>5}/"
+                    f"{_format_mb(card.mem_total_mb)}"
                 )
             else:
-                bars = max(0, min(5, vram_width - 11))
                 text = (
                     f"{_compact_mb(card.mem_used_mb)}/"
                     f"{_compact_mb(card.mem_total_mb)}"
                 )
-                vram = (f"{_bar(card.mem_pct or 0.0, bars)} " if bars else "") + text
+            bars = max(0, vram_width - 1 - len(text))
+            vram = (f"{_bar(card.mem_pct or 0.0, bars)} " if bars else "") + text
         elif self.caps.platform == "macos":
             vram = "unified"
         else:
@@ -654,15 +674,22 @@ class GpuView:
         }
 
     def _card_row(self, card: GpuDetails, columns: list, widths: dict) -> str:
-        cells = self._card_cells(card, widths.get("vram", 22))
+        cells = self._card_cells(
+            card, widths.get("vram", 22), widths.get("busy", 18)
+        )
         return " ".join(
-            _pad(cells[key], widths[key], right=key not in ("name",))
+            _pad(cells[key], widths[key], right=key not in ("name", "busy"))
             for key in columns
         )
 
     def _cards_box(self, cards: list, width: int, rows: int) -> list:
         inner = max(0, width - 4)
-        columns, widths = self._card_layout(inner, multi=len(cards) > 1)
+        name_cap = None
+        if cards:
+            name_cap = max(6, min(_CARD_NAME_MAX, max(len(card.name) for card in cards) + 2))
+        columns, widths = self._card_layout(
+            inner, multi=len(cards) > 1, name_cap=name_cap
+        )
         # The row's POWER cell already shows the only card's figure on a
         # single-GPU host, so a total there would just repeat it.
         total_power = 0.0
