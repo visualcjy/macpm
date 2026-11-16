@@ -14,6 +14,10 @@
   lowest-PID daemons taking the slots.
 - A single-card GPU view no longer repeats that card's power in the box title;
   the total stays on multi-GPU hosts, where each row is one card.
+- Narrow terminals keep the card table's VRAM column: it first shrinks to a
+  short bar with compact numbers, then to numbers only, and is dropped only
+  below ~74 columns.  Previously the whole column disappeared under 86
+  columns.
 
 ## 3.2.0 — 2026-11-16
 

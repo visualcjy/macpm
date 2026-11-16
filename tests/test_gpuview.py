@@ -489,6 +489,37 @@ MAC_SAMPLE_WITH_MEMORY = dict(
 )
 
 
+class NarrowCardTests(unittest.TestCase):
+    def test_memory_survives_a_narrow_table(self):
+        view = make_view([])
+        columns, widths = view._card_layout(74)
+        card = build_cards(SINGLE_SAMPLE, linux_caps())[0]
+
+        self.assertIn("vram", columns)
+        self.assertEqual(widths["vram"], 14)
+        self.assertIn("2G/8G", view._card_cells(card, widths["vram"])["vram"])
+
+    def test_compact_cell_keeps_a_small_bar(self):
+        view = make_view([])
+        _, widths = view._card_layout(78)
+        card = build_cards(SINGLE_SAMPLE, linux_caps())[0]
+
+        cell = view._card_cells(card, widths["vram"])["vram"]
+
+        self.assertTrue(cell.startswith("▉") or cell.startswith("▏"))
+        self.assertIn("2G/8G", cell)
+
+    def test_wide_table_keeps_the_ten_cell_bar(self):
+        view = make_view([])
+        _, widths = view._card_layout(116)
+        card = build_cards(SINGLE_SAMPLE, linux_caps())[0]
+
+        cell = view._card_cells(card, widths["vram"])["vram"]
+
+        self.assertEqual(widths["vram"], 22)
+        self.assertIn("  2.0G/8.0G", cell)
+
+
 class CardsTitleTests(unittest.TestCase):
     def test_single_card_title_has_no_power_total(self):
         view = make_view([])

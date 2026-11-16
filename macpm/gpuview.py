@@ -265,6 +265,16 @@ def _bar(percent: float, width: int) -> str:
     return "▉" * filled + "▏" * (width - filled)
 
 
+def _compact_mb(value: Optional[float]) -> str:
+    """Short form for narrow card tables: ``2G``, ``5.2G``, ``512M``."""
+    if value is None:
+        return "n/a"
+    if value >= 1024:
+        text = f"{value / 1024:.1f}".rstrip("0").rstrip(".")
+        return f"{text}G"
+    return f"{value:.0f}M"
+
+
 def _format_mb(value: Optional[float]) -> str:
     if value is None:
         return "n/a"
@@ -560,24 +570,34 @@ class GpuView:
     # -- card table --------------------------------------------------------
 
     def _card_layout(self, inner: int, multi: bool = False) -> tuple:
-        widths = {key: width for key, _, width in _CARD_COLUMNS}
-        columns = ["idx", "name", "busy", "clock", "power", "vram", "temp",
-                   "mem", "enc", "dec", "pstate"]
-        if multi:
-            # Encode/decode engines only make sense when a single card is the
-            # whole story; on an 8-GPU host they are just noise.
-            columns.remove("enc")
-            columns.remove("dec")
-        for key in ("pstate", "dec", "enc", "mem", "temp", "vram", "clock",
-                    "power", "busy"):
+        def layout(vram_width: int) -> tuple:
+            widths = {key: width for key, _, width in _CARD_COLUMNS}
+            widths["vram"] = vram_width
+            columns = ["idx", "name", "busy", "clock", "power", "vram", "temp",
+                       "mem", "enc", "dec", "pstate"]
+            if multi:
+                # Encode/decode engines only make sense when a single card is
+                # the whole story; on an 8-GPU host they are just noise.
+                columns.remove("enc")
+                columns.remove("dec")
+            for key in ("pstate", "dec", "enc", "mem", "temp", "vram", "clock",
+                        "power", "busy"):
+                fixed = sum(widths[column] for column in columns if column != "name")
+                fixed += len(columns) - 1
+                if inner - fixed >= _CARD_MIN_NAME:
+                    break
+                columns.remove(key)
             fixed = sum(widths[column] for column in columns if column != "name")
             fixed += len(columns) - 1
-            if inner - fixed >= _CARD_MIN_NAME:
-                break
-            columns.remove(key)
-        fixed = sum(widths[column] for column in columns if column != "name")
-        fixed += len(columns) - 1
-        widths["name"] = max(6, inner - fixed)
+            widths["name"] = max(6, inner - fixed)
+            return columns, widths
+
+        # Memory is the point of this view, so shrink the VRAM cell (drop the
+        # bar, then compact the numbers) before the layout drops the column.
+        for vram_width in (22, 14, 10):
+            columns, widths = layout(vram_width)
+            if "vram" in columns:
+                return columns, widths
         return columns, widths
 
     def _card_header(self, columns: list, widths: dict) -> str:
@@ -586,7 +606,7 @@ class GpuView:
             for key in columns
         )
 
-    def _card_cells(self, card: GpuDetails) -> dict:
+    def _card_cells(self, card: GpuDetails, vram_width: int = 22) -> dict:
         if card.busy_pct is None:
             busy = _pad("n/a", 18, right=True)
         else:
@@ -600,10 +620,18 @@ class GpuView:
         else:
             clock = f"{card.freq_mhz:.0f} MHz"
         if card.mem_total_mb:
-            vram = (
-                f"{_bar(card.mem_pct or 0.0, 10)} "
-                f"{_format_mb(card.mem_used_mb):>5}/{_format_mb(card.mem_total_mb)}"
-            )
+            if vram_width >= 20:
+                vram = (
+                    f"{_bar(card.mem_pct or 0.0, 10)} "
+                    f"{_format_mb(card.mem_used_mb):>5}/{_format_mb(card.mem_total_mb)}"
+                )
+            else:
+                bars = max(0, min(5, vram_width - 11))
+                text = (
+                    f"{_compact_mb(card.mem_used_mb)}/"
+                    f"{_compact_mb(card.mem_total_mb)}"
+                )
+                vram = (f"{_bar(card.mem_pct or 0.0, bars)} " if bars else "") + text
         elif self.caps.platform == "macos":
             vram = "unified"
         else:
@@ -626,7 +654,7 @@ class GpuView:
         }
 
     def _card_row(self, card: GpuDetails, columns: list, widths: dict) -> str:
-        cells = self._card_cells(card)
+        cells = self._card_cells(card, widths.get("vram", 22))
         return " ".join(
             _pad(cells[key], widths[key], right=key not in ("name",))
             for key in columns

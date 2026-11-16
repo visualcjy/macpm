@@ -375,6 +375,9 @@ Notes:
   placements, so their difference is never used as "private" memory; anything
   unprovable stays `n/a` rather than being guessed.  Other users' processes
   need root to be inspected, and their bytes show as unattributed.
+- On narrow terminals the card table sheds columns; the VRAM cell shrinks to
+  a short bar with compact numbers (then to numbers only) before the column is
+  dropped, so memory stays visible down to ~74 columns.
 - The default view's GPU gauge shows the busiest card and appends `(max of N)`
   when the machine has more than one.
 
