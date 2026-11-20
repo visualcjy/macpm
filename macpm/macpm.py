@@ -123,7 +123,8 @@ parser.add_argument('--interval', type=int, default=1,
 parser.add_argument('--color', type=int, default=2,
                     help='Choose display color (0~8)')
 parser.add_argument('--no-color', action='store_true', default=False,
-                    help="Use the terminal's default foreground (no accent colour)")
+                    help="Emit no colour; use the terminal's default foreground "
+                         "(pairs with terminal themes and keyword highlighting)")
 parser.add_argument('--native', action='store_true', default=False,
                     help='Start in the built-in semantic colour theme')
 parser.add_argument('--avg', type=int, default=30,

@@ -123,7 +123,7 @@ macpm [--interval INTERVAL] [--color COLOR] [--avg AVG] [--show_cores [BOOL]] [-
 | `--interval SECONDS` | Sampling and display interval (default `1`) |
 | `--color 1-8` | Display colour (default `2`) |
 | `--native` | Start in the built-in semantic colour theme |
-| `--no-color` | Use the terminal's default foreground (no accent colour) |
+| `--no-color` | Emit no colour; use the terminal's default foreground (works with terminal themes and keyword highlighting) |
 | `--avg SECONDS` | Averaging window for power values (default `30`) |
 | `--show_cores [BOOL]` | Start in the per-core view |
 | `--no-public-ip` | Do not look up the public IP and location |
@@ -156,8 +156,20 @@ single-card GPU tables only the header row and the current sort column are
 bright; the other normal cells stay dim.  The palette uses fixed xterm-256
 indices (16-255), so it does not follow the terminal profile.
 
-`--no-color` is outside the ring: it keeps the terminal's default foreground
-for a monochrome setup or a terminal-side keyword highlighter.
+### No colour
+
+`--no-color` emits no foreground colour at all: frames, labels, numbers, bars
+and footer hints all use the terminal's default foreground.  This is the mode
+to combine with the terminal's own theme and keyword highlighting (iTerm2
+`Triggers → Highlight Text`, NyaTerm `内置规则`, etc.), so numbers, errors or
+IP addresses can be coloured by the terminal instead of macpm.  It is outside
+the `←`/`→` ring: pressing an arrow returns to a colour theme, and the flag wins
+over `--color`/`--native` if both are given.  Bars and frames stay readable
+because they are drawn with block and box glyphs, not colour.
+
+```sh
+macpm --no-color
+```
 
 | | |
 |---|---|

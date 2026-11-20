@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- Documented `--no-color`: it emits no foreground colour, uses the terminal's
+  own foreground, and can be paired with terminal themes and keyword
+  highlighting; it stays outside the `←`/`→` ring.
+
 ## 3.3.0 — 2026-11-20
 
 ### Added
