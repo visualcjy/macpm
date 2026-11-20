@@ -7,6 +7,7 @@ blessed/ANSI so views 1/2 share the palette and border helpers of views 3-5.
 
 from __future__ import annotations
 
+from .theme import KEY, OK, TITLE, UniformPalette, metric_spans, paint_spans, severity, title_spans
 from .tui import RESET_FG, _border, _bottom, _fit, _pad
 
 _VBARS = "▁▂▃▄▅▆▇█"
@@ -27,21 +28,39 @@ def _bordered(tile) -> bool:
     return getattr(tile, "border_color", None) is not None
 
 
-def _write(out: list, term, row: int, column: int, text: str, color: str) -> None:
+def _write(out: list, term, row: int, column: int, text: str, palette, role=None) -> None:
     # Always write, including spaces: the terminal keeps stale cells when a
     # bar shrinks, which looked like a horizontal streak at the chart top.
-    out.append(term.move(row, column) + color + text + RESET_FG)
+    if getattr(palette, "native", False):
+        spans = metric_spans(text, role or KEY)
+    else:
+        spans = [(text, role)]
+    out.append(term.move(row, column) + paint_spans(spans, palette))
 
 
-def _box(tile, row, col, width, height, out, term, color) -> None:
+def _write_spans(out: list, term, row: int, column: int, spans, palette, width=None) -> None:
+    out.append(term.move(row, column) + paint_spans(spans, palette, width))
+
+
+def _box(tile, row, col, width, height, out, term, palette) -> None:
+    color = palette.accent()
+    title_role = getattr(tile, "title_role", None) or TITLE
     title = getattr(tile, "title", "") or ""
     bottom = getattr(tile, "bottom_title", "") or ""
     line = _fit(f" {title} ", max(0, width - 2)) if title else ""
     out.append(term.move(row, col) + color + _border(width, line) + RESET_FG)
+    if line:
+        _write_spans(out, term, row, col + 1, title_spans(line, title_role), palette)
     if height > 1:
         out.append(
             term.move(row + height - 1, col) + color + _bottom(width, bottom) + RESET_FG
         )
+        fitted_bottom = _fit(bottom, max(0, width - 2))
+        if fitted_bottom:
+            _write_spans(
+                out, term, row + height - 1, col + 1,
+                metric_spans(fitted_bottom, TITLE), palette,
+            )
     for offset in range(1, max(1, height - 1)):
         out.append(term.move(row + offset, col) + color + "│" + RESET_FG)
         out.append(
@@ -122,7 +141,7 @@ def _chart_values(tile, width: int) -> list:
     return points[-width:] if width > 0 else []
 
 
-def _chart(tile, row, col, width, height, out, term, color) -> None:
+def _chart(tile, row, col, width, height, out, term, palette) -> None:
     points = _chart_values(tile, width)
     # Newest sample sits at the right edge; older ones scroll out to the left.
     offset = width - len(points)
@@ -138,25 +157,45 @@ def _chart(tile, row, col, width, height, out, term, color) -> None:
                 chars.append(_VBARS[min(7, max(0, int(level * 8) - 1))])
             else:
                 chars.append(" ")
-        _write(out, term, row + line, col, "".join(chars), color)
+        _write(out, term, row + line, col, "".join(chars), palette, OK)
 
 
-def _sensor(tile, row, col, width, height, out, term, color) -> None:
+def _sensor(tile, row, col, width, height, out, term, palette) -> None:
     lines = list(getattr(tile, "lines", []) or [])
+    styled = [list(line) for line in (getattr(tile, "styled_lines", []) or [])]
     levels = getattr(tile, "levels", None)
-    if levels and len(lines) < height:
-        lines.append(tile._fan_bars(max(0, width - 1)))
+    if levels:
+        fan_line = [(tile._fan_bars(max(0, width - 1)), None)]
+        if styled:
+            if len(styled) < height:
+                styled.append(fan_line)
+        elif len(lines) < height:
+            lines.append(tile._fan_bars(max(0, width - 1)))
     for offset in range(height):
-        text = lines[offset] if offset < len(lines) else ""
-        _write(out, term, row + offset, col, _pad(_fit(text, width), width), color)
+        if offset < len(styled):
+            _write_spans(out, term, row + offset, col, styled[offset], palette, width)
+        elif offset < len(lines):
+            text = _pad(_fit(lines[offset], width), width)
+            _write(out, term, row + offset, col, text, palette, KEY)
+        else:
+            _write_spans(out, term, row + offset, col, [], palette, width)
 
 
-def paint(tile, row, col, width, height, out, term, color) -> None:
+def _bar_role(palette, tile):
+    if not getattr(palette, "native", False):
+        return None
+    metric = getattr(tile, "metric", None)
+    if not metric:
+        return None
+    return severity(metric, getattr(tile, "value", 0))
+
+
+def paint(tile, row, col, width, height, out, term, palette) -> None:
     if width <= 0 or height <= 0:
         return
     bordered = _bordered(tile) and width >= 3 and height >= 3
     if bordered:
-        _box(tile, row, col, width, height, out, term, color)
+        _box(tile, row, col, width, height, out, term, palette)
         row, col, width, height = row + 1, col + 1, width - 2, height - 2
 
     name = type(tile).__name__
@@ -165,7 +204,7 @@ def paint(tile, row, col, width, height, out, term, color) -> None:
         if name in ("VSplit", "FillVSplit"):
             y = row
             for item, child_height in zip(items, _heights(tile, height)):
-                paint(item, y, col, width, child_height, out, term, color)
+                paint(item, y, col, width, child_height, out, term, palette)
                 y += child_height
         else:
             x = col
@@ -175,7 +214,7 @@ def paint(tile, row, col, width, height, out, term, color) -> None:
                 # one long bar.  Bordered panels already have their own frame,
                 # so they stay flush.
                 gutter = 1 if index < len(items) - 1 and not _bordered(item) else 0
-                paint(item, row, x, max(0, child_width - gutter), height, out, term, color)
+                paint(item, row, x, max(0, child_width - gutter), height, out, term, palette)
                 x += child_width
         return
 
@@ -183,25 +222,27 @@ def paint(tile, row, col, width, height, out, term, color) -> None:
         start = 0
         title = getattr(tile, "title", "") or ""
         if title and not bordered:
-            _write(out, term, row, col, _pad(_fit(title, width), width), color)
+            _write(out, term, row, col, _pad(_fit(title, width), width), palette, KEY)
             start = 1
         if getattr(tile, "plain", False):
             return
         value = getattr(tile, "value", 0)
+        role = _bar_role(palette, tile)
         # Fill every row the layout gave us.  View 2 stretches the E/P usage
         # gauges on purpose; the boxes with fixed content height (Memory) cap
         # theirs so this does not repeat a reading there.
         for line in range(start, height):
-            _write(out, term, row + line, col, _hbar(value, width), color)
+            _write(out, term, row + line, col, _hbar(value, width), palette, role)
     elif name == "VGauge":
         start = 0
         title = getattr(tile, "title", "") or ""
         if title and not bordered:
-            _write(out, term, row, col, _pad(_fit(title, width), width), color)
+            _write(out, term, row, col, _pad(_fit(title, width), width), palette, KEY)
             start = 1
         if getattr(tile, "plain", False):
             return
         value = getattr(tile, "value", 0)
+        role = _bar_role(palette, tile)
         inner = max(0, height - start)
         filled = inner * max(0.0, min(100.0, float(value))) / 100.0
         # A vertical bar, not full-width stripes: the height follows the value
@@ -219,24 +260,25 @@ def paint(tile, row, col, width, height, out, term, color) -> None:
                 char = _VBARS[min(7, max(0, int(level * 8) - 1))]
             else:
                 char = " "
-            _write(out, term, row + line, bar_col, char * bar_width, color)
+            _write(out, term, row + line, bar_col, char * bar_width, palette, role)
     elif name == "HChart":
         start = 0
         title = getattr(tile, "title", "") or ""
         if title and not bordered:
-            _write(out, term, row, col, _pad(_fit(title, width), width), color)
+            _write(out, term, row, col, _pad(_fit(title, width), width), palette, KEY)
             start = 1
-        _chart(tile, row + start, col, width, height - start, out, term, color)
+        _chart(tile, row + start, col, width, height - start, out, term, palette)
     elif name == "SensorPanel":
-        _sensor(tile, row, col, width, height, out, term, color)
+        _sensor(tile, row, col, width, height, out, term, palette)
     else:
         title = getattr(tile, "title", "") or ""
         if title:
-            _write(out, term, row, col, _fit(title, width), color)
+            _write(out, term, row, col, _fit(title, width), palette, KEY)
 
 
 def render_tiles(tile, term, color) -> None:
     """Paint ``tile`` over the terminal, leaving the footer row free."""
+    palette = color if hasattr(color, "style") else UniformPalette(color)
     out: list = []
-    paint(tile, 0, 0, term.width, max(1, term.height - 1), out, term, color)
+    paint(tile, 0, 0, term.width, max(1, term.height - 1), out, term, palette)
     print("".join(out), end="", flush=True)

@@ -32,6 +32,7 @@ from .backend import (
 )
 from .capabilities import MACOS_CAPABILITIES, Capabilities
 from .processes import ProcessRow, ProcessSampler
+from .theme import BOX, KEY, LABEL, OK, TITLE, Palette, footer_spans, metric_spans, paint_spans, severity, title_spans
 from .tui import RESET_FG, _border, _bottom, _center, _fit, _format_mem, _pad, _text_width, footer
 
 _SORTS = ["gpu", "pid", "name", "user"]
@@ -351,8 +352,12 @@ class GpuView:
         color: int = 2,
         capabilities: Optional[Capabilities] = None,
         refresh_interval: float = 2.0,
+        no_color: bool = False,
+        native: bool = False,
     ):
         self.color = color
+        self.no_color = no_color
+        self.native = native
         self.caps = capabilities or MACOS_CAPABILITIES
         self.refresh_interval = max(1.0, float(refresh_interval))
         source = None
@@ -682,6 +687,24 @@ class GpuView:
             for key in columns
         )
 
+    def _card_row_spans(self, card: GpuDetails, columns: list, widths: dict) -> list:
+        cells = self._card_cells(
+            card, widths.get("vram", 22), widths.get("busy", 18)
+        )
+        busy_role = severity("load", card.busy_pct) if card.busy_pct is not None else OK
+        vram_role = severity("ram", card.mem_pct) if card.mem_pct is not None else OK
+        spans = []
+        for index, key in enumerate(columns):
+            if index:
+                spans.append((" ", LABEL))
+            text = _pad(cells[key], widths[key], right=key not in ("name", "busy"))
+            bar_role = busy_role if key == "busy" else vram_role if key == "vram" else OK
+            for token, role in metric_spans(text, LABEL):
+                if token and set(token) <= set("▉▏|"):
+                    role = bar_role
+                spans.append((token, role))
+        return spans
+
     def _cards_box(self, cards: list, width: int, rows: int) -> list:
         inner = max(0, width - 4)
         name_cap = None
@@ -852,7 +875,7 @@ class GpuView:
             lines.append("  ·  ".join(str(part) for part in second))
         return lines
 
-    def _info_box(self, term, width: int, inner: int, lines: list, accent: str) -> list:
+    def _info_box(self, term, width: int, inner: int, lines: list, accent: str, palette) -> list:
         reset = RESET_FG
         out = [term.move(0, 0) + accent + _border(width, " GPU INFO ") + reset]
         for index, line in enumerate(lines):
@@ -865,6 +888,16 @@ class GpuView:
         out.append(
             term.move(1 + len(lines), 0) + accent + _bottom(width, "") + reset
         )
+        out.append(
+            term.move(0, 1)
+            + paint_spans(title_spans(_fit(" GPU INFO ", max(0, width - 2)), BOX), palette)
+        )
+        for index, line in enumerate(lines):
+            if inner:
+                out.append(
+                    term.move(1 + index, 2)
+                    + paint_spans(metric_spans(_pad(line, inner), KEY), palette, inner)
+                )
         return out
 
     # -- single-GPU layout: card summary + process table -------------------
@@ -933,7 +966,32 @@ class GpuView:
             for key in columns
         )
 
-    def _single_body(self, cards, rows, width, height, top, inner, accent) -> list:
+    def _process_spans(self, row: ProcessRow, columns: list, widths: dict) -> list:
+        memory = _memory_text(_gpu_memory_mb(row))
+        shared = (
+            _memory_text(row.gpu_shared_mb)
+            if row.gpu_mem_mb is not None and row.gpu_shared_mb is not None
+            else "-"
+        )
+        values = {
+            "pid": str(row.pid),
+            "name": row.name,
+            "user": row.user,
+            "card": row.gpu_card or "-",
+            "gpu": f"{row.gpu_pct:.1f}" if row.util_known else "—",
+            "mem": memory,
+            "shared": shared,
+            "model": row.model or "-",
+        }
+        spans = []
+        for index, key in enumerate(columns):
+            if index:
+                spans.append((" ", LABEL))
+            role = TITLE if key == self.sort else LABEL
+            spans.append((_pad(values[key], widths[key], right=key != "name"), role))
+        return spans
+
+    def _single_body(self, cards, rows, width, height, top, inner, accent, palette) -> list:
         available = height - top
         max_card_rows = max(1, available - 9)
         card_rows = max(1, min(len(cards) or 1, max_card_rows))
@@ -949,6 +1007,36 @@ class GpuView:
             out.append(
                 self._move(top + index, 0) + accent + line + RESET_FG
             )
+
+        if cards:
+            name_cap = max(6, min(_CARD_NAME_MAX, max(len(card.name) for card in cards) + 2))
+            card_columns, card_widths = self._card_layout(
+                inner, multi=len(cards) > 1, name_cap=name_cap
+            )
+            card_title = f" GPUs ({len(cards)}) "
+            if card_rows < len(cards):
+                card_title = f" GPUs ({len(cards)}, showing {card_rows}) "
+            out.append(
+                self._move(top, 1)
+                + paint_spans(title_spans(_fit(card_title, max(0, width - 2)), BOX), palette)
+            )
+            out.append(
+                self._move(top + 1, 2)
+                + paint_spans(
+                    metric_spans(self._card_header(card_columns, card_widths), TITLE),
+                    palette,
+                    inner,
+                )
+            )
+            for index, card in enumerate(cards[:card_rows]):
+                out.append(
+                    self._move(top + 2 + index, 2)
+                    + paint_spans(
+                        self._card_row_spans(card, card_columns, card_widths),
+                        palette,
+                        inner,
+                    )
+                )
 
         proc_top = top + cards_height
         title = f" processes by GPU {len(rows)} "
@@ -985,6 +1073,32 @@ class GpuView:
                 content = " " * inner
             out.append(accent + "│ " + content + " │" + RESET_FG)
 
+        # Only the header row and the current sort column are bright.
+        header = self._process_header(columns, widths)
+        out.append(
+            self._move(proc_top + 1, 2)
+            + paint_spans(metric_spans(header, TITLE), palette, inner)
+        )
+        if self.ready:
+            for index in range(body_height):
+                entry = start + index
+                if entry >= len(rows):
+                    break
+                out.append(
+                    self._move(proc_top + 2 + index, 2)
+                    + paint_spans(
+                        self._process_spans(rows[entry], columns, widths),
+                        palette,
+                        inner,
+                    )
+                )
+        out.append(
+            self._move(proc_top, 1)
+            + paint_spans(
+                title_spans(_fit(title, max(0, width - 2)), BOX), palette
+            )
+        )
+
         out += [
             self._move(height - 1, 0),
             accent,
@@ -995,7 +1109,7 @@ class GpuView:
 
     # -- multi-GPU layout: one table, two lines per card -------------------
 
-    def _multi_body(self, cards, rows, width, height, top, inner, accent) -> list:
+    def _multi_body(self, cards, rows, width, height, top, inner, accent, palette) -> list:
         content_height = max(1, height - top - 3)
         columns, widths = self._card_layout(inner, multi=len(cards) > 1)
         per_card = self._per_card_rows(rows)
@@ -1038,6 +1152,14 @@ class GpuView:
                 "│ " + text + " │",
                 RESET_FG,
             ]
+        out.append(
+            self._move(top, 1)
+            + paint_spans(title_spans(_fit(title, max(0, width - 2)), BOX), palette)
+        )
+        out.append(
+            self._move(top + 1, 2)
+            + paint_spans(metric_spans(header, TITLE), palette, inner)
+        )
         out += [
             self._move(height - 1, 0),
             accent,
@@ -1071,7 +1193,13 @@ class GpuView:
         self.cards = cards
         rows = self._visible_rows()
         inner = max(0, width - 4)
-        accent = term.color(self.color)
+        palette = Palette(
+            term,
+            self.color,
+            getattr(self, "native", False),
+            getattr(self, "no_color", False),
+        )
+        accent = palette.accent()
 
         out = []
         top = 0
@@ -1082,12 +1210,18 @@ class GpuView:
                 lines = lines[:1]
             lines = lines[:2]
             if lines:
-                out += self._info_box(term, width, inner, lines, accent)
+                out += self._info_box(term, width, inner, lines, accent, palette)
                 top = len(lines) + 2
 
         if len(cards) > 1:
-            out += self._multi_body(cards, rows, width, height, top, inner, accent)
+            out += self._multi_body(cards, rows, width, height, top, inner, accent, palette)
         else:
-            out += self._single_body(cards, rows, width, height, top, inner, accent)
+            out += self._single_body(cards, rows, width, height, top, inner, accent, palette)
+        fitted_footer = _fit(self._footer_text(), max(0, width - 2))
+        if fitted_footer:
+            out.append(
+                term.move(height - 1, 1)
+                + paint_spans(footer_spans(fitted_footer), palette)
+            )
         out.append(term.move(height - 2, 0))
         print("".join(out), end="", flush=True)

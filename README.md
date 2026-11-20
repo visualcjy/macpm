@@ -10,6 +10,21 @@ A Python-based `nvtop`-inspired terminal monitor for Apple Silicon Macs,
 forked from [asitop](https://github.com/tlkh/asitop), with an x86_64/arm64
 Linux backend.
 
+## What's new in 3.3
+
+- **Built-in semantic colour theme.**  The ninth `←`/`→` stop (`--native`)
+  paints by role instead of one accent colour: grey frame, bright-white machine
+  title and numbers, brown category box names, near-white field names, dim
+  secondary text, blue IO rates, cyan IP addresses, green normal bars, yellow
+  footer key hints, and amber/red only for warnings.  The palette is fixed
+  xterm-256 output, so it does not depend on the terminal profile.
+- **Readable tables.**  In the process, network and single-card GPU tables only
+  the header row and the current sort column stay bright; other normal cells
+  are dim.  GPU card BUSY/VRAM bars follow the same green/amber/red thresholds.
+- **`--no-color` stays monochrome** and remains outside the colour ring.
+
+![macpm native semantic palette](https://raw.githubusercontent.com/visualcjy/macpm/main/images/native.png)
+
 ## What's new in 3.0
 
 - **Runs on Linux** (x86_64/arm64/LoongArch64) from the same package: `/proc`
@@ -33,6 +48,10 @@ Default view — CPU/GPU/ANE utilisation and power, memory, temperatures/fans,
 disk I/O and network, updating once per second:
 
 ![macpm default view](https://raw.githubusercontent.com/visualcjy/macpm/main/images/macpm_v.gif)
+
+The built-in semantic palette (`--native`, the ninth colour stop):
+
+![macpm native semantic palette](https://raw.githubusercontent.com/visualcjy/macpm/main/images/native.png)
 
 Same view in another colour theme (press ← / → to cycle through them):
 
@@ -103,6 +122,8 @@ macpm [--interval INTERVAL] [--color COLOR] [--avg AVG] [--show_cores [BOOL]] [-
 |---|---|
 | `--interval SECONDS` | Sampling and display interval (default `1`) |
 | `--color 1-8` | Display colour (default `2`) |
+| `--native` | Start in the built-in semantic colour theme |
+| `--no-color` | Use the terminal's default foreground (no accent colour) |
 | `--avg SECONDS` | Averaging window for power values (default `30`) |
 | `--show_cores [BOOL]` | Start in the per-core view |
 | `--no-public-ip` | Do not look up the public IP and location |
@@ -124,7 +145,19 @@ Ctrl+R          reset peaks
 ## Colour themes
 
 Pick one with `--color N`, or press ← / → while macpm is running.  The default
-is `2` (green).
+is `2` (green).  The ring has nine stops: `1`-`8` paint the whole UI in one ANSI
+accent colour, and the ninth (`--native`, or → from `8`) uses macpm's own
+semantic palette instead: frame lines stay grey, the machine title and numbers
+are bright white, category box names (Memory, Power, Disk IO, Network IO) are
+brown, field names near-white, ordinary text dim, IO rates blue, IP addresses
+cyan, normal bars the original green, footer key hints yellow, and only
+warnings/critical readings use amber/red.  In the process, network and
+single-card GPU tables only the header row and the current sort column are
+bright; the other normal cells stay dim.  The palette uses fixed xterm-256
+indices (16-255), so it does not follow the terminal profile.
+
+`--no-color` is outside the ring: it keeps the terminal's default foreground
+for a monochrome setup or a terminal-side keyword highlighter.
 
 | | |
 |---|---|
@@ -292,7 +325,7 @@ shows `n/a` and the reason stays in the data
 
 A single-GPU machine keeps the older layout: card summary on top, process table
 below.  Every view's footer starts with the app name and version
-(`macpm v3.2.0 · q quit …`).
+(`macpm v3.3.0 · q quit …`).
 
 ```text
 ┌ GPU INFO ────────────────────────────────────────────────────────────────────────────────┐
@@ -306,7 +339,7 @@ below.  Every view's footer starts with the app name and version
 │       └ 222 Xorg 2.0G                                                                    │
 │   2 AMD GPU (amdgpu)          ▉▉▉▉▏▏  60% 1100/1750   12.0W  ▉▉▉▉▏▏▏▏▏▏  3.0G/8.0G  46°C │
 │   3 AMD GPU (amdgpu)          ▉▉▉▉▉▏  85% 1200/1750   12.0W  ▉▉▉▉▉▏▏▏▏▏  4.0G/8.0G  49°C │
-└ macpm v3.2.0 · q quit  1-5 view  s sort  ↑/↓ page  Space pause  ←/→ colour ────────────────┘
+└ macpm v3.3.0 · q quit  1-5 view  s sort  ↑/↓ page  Space pause  ←/→ colour ────────────────┘
 ```
 
 | Platform | What fills each row |

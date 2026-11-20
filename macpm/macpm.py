@@ -28,6 +28,7 @@ from .backend import create_sampler, platform_name
 from .capabilities import MACOS_CAPABILITIES
 from .gpuview import GpuView
 from .sensors import SensorReader
+from .theme import BOX, NATIVE, Palette, footer_spans, paint_spans
 from .tui import RESET_FG, _pad, footer
 
 from . import __version__
@@ -74,6 +75,40 @@ def _bool(value):
     return str(value).strip().lower() in ('1', 'true', 'yes', 'on')
 
 
+def _palette(term, args):
+    return Palette(
+        term,
+        args.color,
+        getattr(args, "native", False),
+        getattr(args, "no_color", False),
+    )
+
+
+# The ←/→ ring.  The last stop is the built-in semantic theme, so → from 8 and
+# ← from 1 both land on it; the default theme (2) keeps its position.
+_THEMES = (1, 2, 3, 4, 5, 6, 7, 8, NATIVE)
+
+
+def _cycle_theme(args, step):
+    """Move ``args`` one stop around the colour ring (step -1 or +1)."""
+    if getattr(args, "no_color", False):
+        # --no-color is a startup-only monochrome mode, outside the ring.
+        args.no_color = False
+        args.native = False
+    current = NATIVE if getattr(args, "native", False) else args.color
+    try:
+        index = _THEMES.index(current)
+    except ValueError:
+        index = _THEMES.index(2)
+    theme = _THEMES[(index + step) % len(_THEMES)]
+    if theme == NATIVE:
+        # Keep the numeric theme for borders and the core-gauge layout.
+        args.native = True
+    else:
+        args.native = False
+        args.color = theme
+
+
 _PLATFORM_DESC = (
     'performance monitoring CLI tool for Linux (run as root for power/GPU)'
     if platform_name() == 'linux'
@@ -87,6 +122,10 @@ parser.add_argument('--interval', type=int, default=1,
                     help='Display interval and sampling interval (seconds)')
 parser.add_argument('--color', type=int, default=2,
                     help='Choose display color (0~8)')
+parser.add_argument('--no-color', action='store_true', default=False,
+                    help="Use the terminal's default foreground (no accent colour)")
+parser.add_argument('--native', action='store_true', default=False,
+                    help='Start in the built-in semantic colour theme')
 parser.add_argument('--avg', type=int, default=30,
                     help='Interval for averaged values (seconds)')
 parser.add_argument('--show_cores', nargs='?', const=True, default=False, type=_bool,
@@ -269,6 +308,7 @@ class DefaultView():
         self._netinfo_text = ""
         self.caps = capabilities or MACOS_CAPABILITIES
         self._applied_color = args.color
+        self._applied_native = getattr(args, "native", False)
         self._term = None
         self.gpu_count = int(soc_info_dict.get("gpu_count") or 1)
         self.cpu_peak_power = 0
@@ -304,18 +344,25 @@ class DefaultView():
         core_plain = core_border is None
 
         self.cpu1_gauge = (
-            HGauge(title="E-CPU Usage", val=0, color=args.color) if self.has_e else None
+            HGauge(title="E-CPU Usage", val=0, color=args.color, metric="load")
+            if self.has_e
+            else None
         )
         self.cpu2_gauge = HGauge(
             title="P-CPU Usage" if self.has_e else "CPU Usage",
             val=0,
             color=args.color,
+            metric="load",
         )
         self.gpu_gauge = (
-            HGauge(title="GPU Usage", val=0, color=args.color) if self.has_gpu else None
+            HGauge(title="GPU Usage", val=0, color=args.color, metric="load")
+            if self.has_gpu
+            else None
         )
         self.ane_gauge = (
-            HGauge(title="ANE", val=0, color=args.color) if self.has_ane else None
+            HGauge(title="ANE", val=0, color=args.color, metric="load")
+            if self.has_ane
+            else None
         )
         self.gpu_ane_gauges = [
             gauge for gauge in (self.gpu_gauge, self.ane_gauge) if gauge is not None
@@ -327,7 +374,7 @@ class DefaultView():
 
         self.e_core_gauges = (
             [
-                VGauge(val=0, color=args.color, border_color=core_border)
+                VGauge(val=0, color=args.color, border_color=core_border, metric="load")
                 for _ in range(self.e_core_count)
             ]
             if self.has_e
@@ -364,6 +411,7 @@ class DefaultView():
                         color=args.color,
                         border_color=core_border,
                         plain=core_plain,
+                        metric="load",
                     )
                     for _ in range(width)
                 ]
@@ -441,6 +489,7 @@ class DefaultView():
             color=args.color,
             min_height=2,
             max_height=2,
+            metric="ram",
         )
         self.memory_detail = SensorPanel(color=args.color, lines=[], fill=True)
         self.memory_gauges = VSplit(
@@ -516,6 +565,18 @@ class DefaultView():
                         border_color=args.color,
         )
 
+        # Category panels use the brown box-title role; the machine title
+        # on the processor box stays bright white.
+        for panel in (
+            self.memory_gauges,
+            self.sensor_panel,
+            self.disk_io_charts,
+            self.network_io_charts,
+        ):
+            panel.title_role = BOX
+        if self.power_charts is not None:
+            self.power_charts.title_role = BOX
+
         tail = []
         if self.power_charts is not None:
             tail.append(self.power_charts)
@@ -535,6 +596,7 @@ class DefaultView():
                 *tail,
             )
         self.usage_gauges = self.ui.items[0]
+        self.usage_gauges.title_role = BOX
 
         cores = f"{self.e_core_count}E+" if self.e_core_count else ""
         gpu_cores = soc_info_dict.get("gpu_core_count")
@@ -602,7 +664,7 @@ class DefaultView():
             term = self._term = Terminal()
         from .blessed_engine import render_tiles
 
-        render_tiles(self.ui, term, term.color(args.color))
+        render_tiles(self.ui, term, _palette(term, args))
 
     def _draw_extras(self, args):
         term = self._term
@@ -611,17 +673,13 @@ class DefaultView():
         width, height = term.width, term.height
         if width < 20 or height < 6:
             return
-        accent = term.color(args.color)
-        reset = RESET_FG
+        palette = _palette(term, args)
         # The key hints are plain text on the last terminal row: the network
         # summary already has the Network IO box's bottom border.
+        text = _pad(" " + _DEFAULT_FOOTER, width)
         out = [
             term.move(height - 1, 0)
-            + accent
-            # One extra space so the hints start in the same column as the
-            # network text on the box border above ("└ en0 …" / "  macpm …").
-            + _pad(" " + _DEFAULT_FOOTER, width)
-            + reset
+            + paint_spans(footer_spans(text), palette)
         ]
         print("".join(out), end="", flush=True)
 
@@ -644,9 +702,13 @@ class DefaultView():
             )
         if sensors is not None:
             self.sensor_panel.lines = sensors.lines()
+            styled_lines = getattr(sensors, "styled_lines", None)
+            if callable(styled_lines):
+                self.sensor_panel.styled_lines = styled_lines()
             self.sensor_panel.levels = sensors.fan_levels()
-        if args.color != self._applied_color:
+        if args.color != self._applied_color or getattr(args, "native", False) != self._applied_native:
             self._applied_color = args.color
+            self._applied_native = getattr(args, "native", False)
             clear_console()
             for gauge in (
                 self.cpu1_gauge,
@@ -1146,28 +1208,40 @@ def begin(stdscr, sampler):
                     running = False
                     break
                 elif key == curses.KEY_LEFT:
-                    args.color = (args.color - 1) if args.color > 1 else 8
+                    _cycle_theme(args, -1)
                     if view == 3 and process_view is not None:
                         process_view.color = args.color
+                        process_view.no_color = args.no_color
+                        process_view.native = args.native
                         redraw_process = True
                     elif view == 4 and network_view is not None:
                         network_view.color = args.color
+                        network_view.no_color = args.no_color
+                        network_view.native = args.native
                         redraw_network = True
                     elif view == 5 and gpu_view is not None:
                         gpu_view.color = args.color
+                        gpu_view.no_color = args.no_color
+                        gpu_view.native = args.native
                         redraw_gpu = True
                     else:
                         redraw_metrics = True
                 elif key == curses.KEY_RIGHT:
-                    args.color = (args.color + 1) if args.color < 8 else 1
+                    _cycle_theme(args, 1)
                     if view == 3 and process_view is not None:
                         process_view.color = args.color
+                        process_view.no_color = args.no_color
+                        process_view.native = args.native
                         redraw_process = True
                     elif view == 4 and network_view is not None:
                         network_view.color = args.color
+                        network_view.no_color = args.no_color
+                        network_view.native = args.native
                         redraw_network = True
                     elif view == 5 and gpu_view is not None:
                         gpu_view.color = args.color
+                        gpu_view.no_color = args.no_color
+                        gpu_view.native = args.native
                         redraw_gpu = True
                     else:
                         redraw_metrics = True
@@ -1229,9 +1303,13 @@ def begin(stdscr, sampler):
                             args.color,
                             soc_title,
                             max(2.0, float(args.interval)),
+                            no_color=args.no_color,
+                            native=getattr(args, "native", False),
                         )
                     else:
                         process_view.color = args.color
+                        process_view.no_color = args.no_color
+                        process_view.native = getattr(args, "native", False)
                     process_view.prime()
                     process_summary = get_process_summary(powermetrics_parse, capabilities)
                     view = 3
@@ -1240,9 +1318,16 @@ def begin(stdscr, sampler):
                     refresh_metrics = False
                 elif chr(key) == '4':
                     if network_view is None:
-                        network_view = NetworkView(args.color, netinfo=netinfo)
+                        network_view = NetworkView(
+                            args.color,
+                            netinfo=netinfo,
+                            no_color=args.no_color,
+                            native=getattr(args, "native", False),
+                        )
                     else:
                         network_view.color = args.color
+                        network_view.no_color = args.no_color
+                        network_view.native = getattr(args, "native", False)
                     network_view.prime()
                     view = 4
                     clear_console()
@@ -1254,9 +1339,13 @@ def begin(stdscr, sampler):
                             args.color,
                             capabilities,
                             max(2.0, float(args.interval)),
+                            no_color=args.no_color,
+                            native=getattr(args, "native", False),
                         )
                     else:
                         gpu_view.color = args.color
+                        gpu_view.no_color = args.no_color
+                        gpu_view.native = getattr(args, "native", False)
                     gpu_view.prime()
                     view = 5
                     clear_console()

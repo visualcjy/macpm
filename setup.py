@@ -7,7 +7,7 @@ README = (ROOT / "README.md").read_text(encoding="utf-8")
 
 setup(
     name="macpm",
-    version="3.2.0",
+    version="3.3.0",
     author="Jinyu Chen",
     author_email="visualcjy@mail.com",
     url="https://github.com/visualcjy/macpm",

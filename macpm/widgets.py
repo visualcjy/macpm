@@ -35,9 +35,12 @@ class Tile:
         max_height: int = 0,
         plain: bool = False,
         fill: bool = False,
+        metric=None,
     ):
         self.title = title
         self.value = val
+        self.metric = metric
+        self.title_role = None
         self.color = color
         self.border_color = border_color
         # A panel draws a border when it was given a border colour; gauges and
@@ -124,6 +127,9 @@ class SensorPanel(Tile):
         super().__init__(color=color, **kwargs)
         self.lines = list(lines or [])
         self.levels = list(levels or [])
+        # Optional ``[(text, role), ...]`` rows used by the native theme; the
+        # plain ``lines`` stay as the fallback for the numeric themes.
+        self.styled_lines: list = []
 
     def _fan_bars(self, width: int) -> str:
         half = max(0, (width - 2) // 2)

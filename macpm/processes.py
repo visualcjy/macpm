@@ -15,6 +15,7 @@ import psutil
 from blessed import Terminal
 
 from .backend import platform_name, process_gpu_reader
+from .theme import BOX, CRIT, KEY, LABEL, MUTED, OK, TITLE, VALUE, WARN, Palette, footer_spans, metric_spans, paint_spans, severity, title_spans
 from .tui import (  # noqa: F401 - _fit/_text_width are re-exported for tests
     RESET_FG,
     _border,
@@ -461,9 +462,21 @@ class ProcessView:
     """Two-box process table shown on key 3."""
 
     def __init__(
-        self, color: int = 2, soc_title: str = "", refresh_interval: float = 2.0
+        self,
+        color: int = 2,
+        soc_title: str = "",
+        refresh_interval: float = 2.0,
+        no_color: bool = False,
+        native: bool = False,
     ):
         self.color = color
+        self.no_color = no_color
+        self.native = native
+        self._cpu_count = psutil.cpu_count(logical=True) or 1
+        try:
+            self._total_ram = psutil.virtual_memory().total or 1
+        except Exception:
+            self._total_ram = 1
         self.soc_title = soc_title
         self.refresh_interval = max(0.5, float(refresh_interval))
         self._last_sample = 0.0
@@ -567,7 +580,7 @@ class ProcessView:
     def _cell(self, value, width: int, right: bool) -> str:
         return _pad(str(value), width, right)
 
-    def _row_text(self, row: ProcessRow, columns: list[str], widths: dict[str, int]) -> str:
+    def _row_spans(self, row: ProcessRow, columns: list[str], widths: dict[str, int]) -> list:
         values = {
             "pid": row.pid,
             "name": row.name,
@@ -576,9 +589,44 @@ class ProcessView:
             "mem": _format_mem(row.mem_bytes),
             "gpu": f"{row.gpu_pct:.1f}" if self.sampler.gpu_available else "--",
         }
-        return " ".join(
-            self._cell(values[key], widths[key], key in _NUMERIC) for key in columns
-        )
+        cpu_count = getattr(self, "_cpu_count", 1) or 1
+        total_ram = getattr(self, "_total_ram", 1) or 1
+
+        sorted_key = self.sort
+
+        def cell_role(key, role):
+            # Only the header row and the sorted column are bright; all other
+            # normal cells stay dim.  Warn/crit keep their colour.
+            if role in (WARN, CRIT):
+                return role
+            return TITLE if key == sorted_key else LABEL
+
+        def threshold(key, metric, value):
+            return cell_role(key, severity(metric, value))
+
+        roles = {
+            "pid": cell_role("pid", OK),
+            "name": cell_role("name", OK),
+            "user": LABEL,
+            "cpu": threshold("cpu", "proc_cpu", row.cpu_pct / cpu_count),
+            "mem": threshold("mem", "proc_mem", row.mem_bytes / total_ram * 100),
+            "gpu": (
+                threshold("gpu", "proc_gpu", row.gpu_pct)
+                if self.sampler.gpu_available and row.util_known
+                else MUTED
+            ),
+        }
+        spans = []
+        for index, key in enumerate(columns):
+            if index:
+                spans.append((" ", None))
+            spans.append(
+                (self._cell(values[key], widths[key], key in _NUMERIC), roles[key])
+            )
+        return spans
+
+    def _row_text(self, row: ProcessRow, columns: list[str], widths: dict[str, int]) -> str:
+        return "".join(text for text, _ in self._row_spans(row, columns, widths))
 
     def _header_text(self, columns: list[str], widths: dict[str, int]) -> str:
         cells = []
@@ -610,19 +658,36 @@ class ProcessView:
         self._body_height = body_height
         self.offset = max(0, min(self.offset, max(0, len(rows) - body_height)))
 
-        accent = term.color(self.color)
+        palette = Palette(
+            term,
+            self.color,
+            getattr(self, "native", False),
+            getattr(self, "no_color", False),
+        )
+        accent = palette.accent()
         reset = RESET_FG
         content_width = max(0, width - 4)
 
+        def line(spans, pad: int = content_width) -> str:
+            return (
+                accent
+                + "│ "
+                + paint_spans(spans, palette, pad)
+                + accent
+                + " │"
+                + reset
+            )
+
         out = [term.move(0, 0), accent, _border(width, f" {self.soc_title} "), reset]
+        soc_line = _fit(f" {self.soc_title} ", max(0, width - 2))
+        if soc_line:
+            out.append(
+                term.move(0, 1)
+                + paint_spans(title_spans(soc_line, BOX), palette)
+            )
         for index in range(3):
             text = self.summary[index] if index < len(self.summary) else ""
-            out += [
-                term.move(1 + index, 0),
-                accent,
-                "│ " + _pad(text, content_width) + " │",
-                reset,
-            ]
+            out += [term.move(1 + index, 0), line(metric_spans(text, KEY))]
         out += [term.move(4, 0), accent, _bottom(width, ""), reset]
 
         proc_title = f" proc {len(rows)} "
@@ -634,27 +699,34 @@ class ProcessView:
             _border(width, proc_title, " s sort "),
             reset,
         ]
+        proc_line = _fit(proc_title, max(0, width - 2))
+        if proc_line:
+            out.append(
+                term.move(5, 1)
+                + paint_spans(title_spans(proc_line, BOX), palette)
+            )
 
-        header = _pad(self._header_text(columns, widths), content_width)
-        out += [
-            term.move(6, 0),
-            accent,
-            "│ " + header + " │",
-            reset,
-        ]
+        header = self._header_text(columns, widths)
+        out += [term.move(6, 0), line(metric_spans(header, KEY))]
 
         for index in range(body_height):
             entry = index + self.offset
             if not self.ready:
-                content = _center("collecting…", content_width)
+                spans = [(_center("collecting…", content_width), MUTED)]
             elif entry < len(rows):
-                content = _pad(self._row_text(rows[entry], columns, widths), content_width)
+                spans = self._row_spans(rows[entry], columns, widths)
             else:
-                content = " " * content_width
+                spans = []
             out.append(term.move(7 + index, 0))
-            out.append(accent + "│ " + content + " │" + reset)
+            out.append(line(spans))
 
         footer = _FOOTER_PAUSED if self.paused else _FOOTER
         out += [term.move(height - 1, 0), accent, _bottom(width, footer), reset]
+        fitted_footer = _fit(footer, max(0, width - 2))
+        if fitted_footer:
+            out.append(
+                term.move(height - 1, 1)
+                + paint_spans(footer_spans(fitted_footer), palette)
+            )
         out.append(term.move(height - 2, 0))
         print("".join(out), end="", flush=True)

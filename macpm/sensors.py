@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from .backend import is_linux, platform_name
+from .theme import KEY, LABEL, MUTED, VALUE, value_role
 
 
 def _format_temperature(value: Optional[float]) -> str:
@@ -186,6 +187,52 @@ class SensorReader:
         else:
             fan_text = "Fan: none"
         return [cpu, gpu, fan_text]
+
+    def styled_lines(self) -> list:
+        """Same rows as :meth:`lines`, split into ``(text, role)`` spans."""
+        if self.error is not None:
+            return [
+                [("sensors unavailable", MUTED)],
+                [(self.error, MUTED)],
+            ]
+        if not self.ready:
+            return [[("reading...", MUTED)]]
+
+        def temperature(label, value, peak):
+            spans = [(f"{label} ", KEY)]
+            if value is None:
+                spans.append(("--", MUTED))
+            else:
+                spans.append((f"{value:.1f}", value_role("temp", value)))
+                spans.append(("\N{DEGREE SIGN}C", LABEL))
+            spans.append(("   peak ", LABEL))
+            if peak is None:
+                spans.append(("--", MUTED))
+            else:
+                spans.append((f"{peak:.1f}", value_role("temp", peak)))
+                spans.append(("\N{DEGREE SIGN}C", LABEL))
+            return spans
+
+        rows = [
+            temperature("CPU", self.cpu_c, self.cpu_peak),
+            temperature("GPU", self.gpu_c, self.gpu_peak),
+        ]
+        if self.fans:
+            fan_spans = []
+            for index, fan in enumerate(self.fans):
+                if index:
+                    fan_spans.append(("  ", LABEL))
+                fan_spans.append((f"Fan {fan['id'] + 1} ", KEY))
+                rpm = fan.get("rpm")
+                max_rpm = fan.get("max_rpm")
+                fan_spans.append(
+                    (_format_rpm_value(rpm), VALUE)
+                )
+                fan_spans.append((" rpm", LABEL))
+            rows.append(fan_spans)
+        else:
+            rows.append([("Fan: none", MUTED)])
+        return rows
 
     def fan_levels(self) -> list:
         """Fan labels and their current speed as a percentage of maximum."""

@@ -1,6 +1,25 @@
 # Changelog
 
-## Unreleased
+## 3.3.0 — 2026-11-20
+
+### Added
+
+- A ninth colour stop, the built-in semantic theme (`--native`, or `→` from
+  `8`): grey frame, bright-white machine title and numbers, brown category box
+  names, near-white field names, dim secondary text, blue IO rates, cyan IP
+  addresses, green normal bars, yellow footer key hints, and amber/red only for
+  warnings.  Gauges and temperatures use green/amber/red at 60/85% load,
+  75/90°C, 75/90% RAM, 50/80% process CPU and 5/15% process memory.  The palette
+  uses fixed xterm-256 indices (16-255), so it does not follow the terminal.
+- Table lists only keep the header row and the current sort column bright; all
+  other normal cells are dim.  This applies to the process view, the network
+  traffic/listener tables and the single-card GPU process table, and fits the
+  brown titles, blue rates, cyan addresses and yellow footer keys throughout.
+- GPU card `BUSY`/`VRAM` bars use the same green/amber/red thresholds instead of
+  being uncoloured; `GPU INFO`, `GPUs (N)` and the per-card headers follow the
+  same title/header roles.
+- `--no-color` remains a startup-only monochrome mode outside the ring.
+- `images/native.png`: the semantic palette screenshot used in the README.
 
 ### Changed
 

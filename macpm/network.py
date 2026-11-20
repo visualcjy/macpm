@@ -34,7 +34,8 @@ from .netmodel import (
     _split_pid,
     _state_label,
 )
-from .tui import RESET_FG, _border, _bottom, _center, _pad, footer
+from .theme import ADDRESS, BOX, KEY, LABEL, RATE, TITLE, Palette, footer_spans, metric_spans, paint_spans, title_spans
+from .tui import RESET_FG, _border, _bottom, _center, _fit, _pad, footer
 
 NETTOP = "/usr/bin/nettop"
 
@@ -287,8 +288,12 @@ class NetworkView:
         public_ip: bool = True,
         sampler: Optional[NetworkSampler] = None,
         netinfo: Optional[NetworkInfoService] = None,
+        no_color: bool = False,
+        native: bool = False,
     ):
         self.color = color
+        self.no_color = no_color
+        self.native = native
         self.full_interval = max(2.0, float(full_interval))
         self.fast_interval = max(1.0, float(fast_interval))
         if sampler is None:
@@ -485,6 +490,49 @@ class NetworkView:
         cells += [f"{_format_rate(row.rx_bps):>{rate_w}}", f"{_format_rate(row.tx_bps):>{rate_w}}"]
         return " ".join(cells)
 
+    def _traffic_spans(self, row: ProcessTraffic, widths) -> list:
+        pid_w, process_w, conn_w, rate_w = widths
+        cells = [("pid", f"{row.pid:>{pid_w}}"), ("name", _pad(row.name, process_w))]
+        if conn_w:
+            cells.append(("conns", f"{row.conns:>{conn_w}}"))
+        cells += [
+            ("rx", f"{_format_rate(row.rx_bps):>{rate_w}}"),
+            ("tx", f"{_format_rate(row.tx_bps):>{rate_w}}"),
+        ]
+        spans = []
+        for index, (key, text) in enumerate(cells):
+            if index:
+                spans.append((" ", LABEL))
+            if key == self.traffic_sort:
+                role = TITLE
+            elif key in ("rx", "tx"):
+                role = RATE
+            else:
+                role = LABEL
+            spans.append((text, role))
+        return spans
+
+    def _listener_spans(self, row: SocketRow, widths) -> list:
+        addr_w, pid_w, process_w = widths
+        pid = "-" if row.pid is None else str(row.pid)
+        cells = [
+            ("port", _pad(_display_addr(row.local), addr_w)),
+            ("pid", f"{pid:>{pid_w}}"),
+            ("process", _pad(row.process, process_w)),
+        ]
+        spans = []
+        for index, (key, text) in enumerate(cells):
+            if index:
+                spans.append((" ", LABEL))
+            if key == self.listener_sort:
+                role = TITLE
+            elif key == "port":
+                role = ADDRESS
+            else:
+                role = LABEL
+            spans.append((text, role))
+        return spans
+
     def _listener_header(self, widths) -> str:
         addr_w, pid_w, process_w = widths
         return " ".join(
@@ -614,7 +662,13 @@ class NetworkView:
         self.offsets[0] = max(0, min(self.offsets[0], max(0, len(traffic_rows) - self.bodies[0])))
         self.offsets[1] = max(0, min(self.offsets[1], max(0, len(listener_rows) - self.bodies[1])))
 
-        accent = term.color(self.color)
+        palette = Palette(
+            term,
+            self.color,
+            getattr(self, "native", False),
+            getattr(self, "no_color", False),
+        )
+        accent = palette.accent()
         reset = RESET_FG
         out: list[str] = []
 
@@ -628,6 +682,21 @@ class NetworkView:
         emit(2, 0, "│ " + _pad(line1, inner) + " │")
         emit(3, 0, "│ " + _pad(line2, inner) + " │")
         emit(4, 0, _bottom(width, ""))
+
+        # Native semantics: brown box name, near-white labels, white numbers,
+        # blue rates and cyan addresses, all fixed 256-colour.
+        out.append(
+            term.move(0, 1)
+            + paint_spans(title_spans(_fit(" Network ", max(0, width - 2)), BOX), palette)
+        )
+        for index, text in enumerate(
+            (self._identity_line(), line1, line2), start=1
+        ):
+            if inner:
+                out.append(
+                    term.move(index, 2)
+                    + paint_spans(metric_spans(_pad(text, inner), KEY), palette, inner)
+                )
 
         traffic_widths = self._traffic_widths(traffic_geom[2] - 4)
         traffic_texts = [
@@ -671,5 +740,81 @@ class NetworkView:
         for index, line in enumerate(listener_lines):
             emit(listener_geom[0] + index, listener_geom[1], line)
 
-        emit(height - 1, 0, _bottom(width, self._footer()))
+        # Pane titles brown, headers bright white, and only the sorted column
+        # bright in the body; every other normal cell stays dim.
+        traffic_inner = max(0, traffic_geom[2] - 4)
+        traffic_marker = "▶ " if self.focus == 0 else ""
+        traffic_title = _fit(
+            f" {traffic_marker}{self._traffic_title(traffic_rows)} ",
+            max(0, traffic_geom[2] - 2),
+        )
+        out.append(
+            term.move(traffic_geom[0], traffic_geom[1] + 1)
+            + paint_spans(title_spans(traffic_title, BOX), palette)
+        )
+        if traffic_inner:
+            out.append(
+                term.move(traffic_geom[0] + 1, traffic_geom[1] + 2)
+                + paint_spans(
+                    metric_spans(self._traffic_header(traffic_widths), TITLE),
+                    palette,
+                    traffic_inner,
+                )
+            )
+            if self.ready:
+                for index in range(self.bodies[0]):
+                    position = self.offsets[0] + index
+                    if position >= len(traffic_rows):
+                        break
+                    out.append(
+                        term.move(traffic_geom[0] + 2 + index, traffic_geom[1] + 2)
+                        + paint_spans(
+                            self._traffic_spans(traffic_rows[position], traffic_widths),
+                            palette,
+                            traffic_inner,
+                        )
+                    )
+
+        if listener_geom is not None:
+            listener_inner = max(0, listener_geom[2] - 4)
+            listener_marker = "▶ " if self.focus == 1 else ""
+            listener_title = _fit(
+                f" {listener_marker}{self._listener_title(listener_rows)} ",
+                max(0, listener_geom[2] - 2),
+            )
+            out.append(
+                term.move(listener_geom[0], listener_geom[1] + 1)
+                + paint_spans(title_spans(listener_title, BOX), palette)
+            )
+            if listener_inner:
+                out.append(
+                    term.move(listener_geom[0] + 1, listener_geom[1] + 2)
+                    + paint_spans(
+                        metric_spans(self._listener_header(listener_widths), TITLE),
+                        palette,
+                        listener_inner,
+                    )
+                )
+                if self.ready:
+                    for index in range(self.bodies[1]):
+                        position = self.offsets[1] + index
+                        if position >= len(listener_rows):
+                            break
+                        out.append(
+                            term.move(listener_geom[0] + 2 + index, listener_geom[1] + 2)
+                            + paint_spans(
+                                self._listener_spans(listener_rows[position], listener_widths),
+                                palette,
+                                listener_inner,
+                            )
+                        )
+
+        footer = self._footer()
+        emit(height - 1, 0, _bottom(width, footer))
+        fitted_footer = _fit(footer, max(0, width - 2))
+        if fitted_footer:
+            out.append(
+                term.move(height - 1, 1)
+                + paint_spans(footer_spans(fitted_footer), palette)
+            )
         print("".join(out), end="", flush=True)
