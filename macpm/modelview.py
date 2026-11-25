@@ -465,7 +465,11 @@ class ModelView:
     def _detail_lines(self, service: Service, inner: int,
                       stats: Optional[ModelStats]) -> list:
         def field(name: str, value: str, role: str = VALUE) -> list:
-            return [(_pad(name, 10), KEY)] + _value_spans(_fit(value, inner - 10))
+            if role == VALUE:
+                spans = _value_spans(_fit(value, inner - 10))
+            else:
+                spans = [(_fit(value, inner - 10), role)]
+            return [(_pad(name, 10), KEY)] + spans
 
         model = (stats.model if stats and stats.model else service.model) or "-"
         lines = [
@@ -515,8 +519,8 @@ class ModelView:
 
     def _metric_lines(self, stats: ModelStats, field, service: Service) -> list:
         lines = []
-        rates = "decode {}   prefill {}".format(_rate(stats.decode_tps), _rate(stats.prefill_tps))
-        lines.append(field("rates", rates))
+        lines.append(field("decode", _rate(stats.decode_tps)))
+        lines.append(field("prefill", _rate(stats.prefill_tps)))
         if stats.slots_total:
             used = stats.slots_used if stats.slots_used is not None else stats.active
             text = "{} / {}".format("-" if used is None else used, stats.slots_total)
@@ -599,26 +603,26 @@ class ModelView:
             return "-" if not mb else "{:.1f} GB".format(mb / 1024.0)
 
         return [
-            ("speed", "Speed", "{:,.1f} tok/s".format(speed) if speed else "--",
-             "now" if speed else "no decoding", "chart", speed or 0.0),
+            ("speed", "Decode", "{:,.1f} tok/s".format(speed) if speed else "--",
+             "now" if speed else "no decoding", "chart", speed or 0.0, None),
             ("gpu", "GPU load", "-" if gpu_pct is None else "{:.0f} %".format(gpu_pct),
-             (gpu.get("name") or "-")[:24], "gauge", gpu_pct),
+             (gpu.get("name") or "-")[:24], "chart", gpu_pct, 100.0),
             ("vram", "VRAM", "{} / {}".format(size(gpu.get("mem_used_mb")),
                                               size(gpu.get("mem_total_mb"))),
              ("model " + size((stats.mem_used or 0) / 1024 ** 2)) if stats and stats.mem_used else "-",
-             "gauge", 100.0 * (gpu.get("mem_used_mb") or 0) / (gpu.get("mem_total_mb") or 1)),
-            ("temp", "GPU temp", "-" if temp is None else "{:.0f} C".format(temp), "", "gauge", temp),
+             "chart", 100.0 * (gpu.get("mem_used_mb") or 0) / (gpu.get("mem_total_mb") or 1), 100.0),
+            ("temp", "GPU temp", "-" if temp is None else "{:.0f} C".format(temp), "", "chart", temp, 100.0),
             ("power", "Power", "{:.1f} W".format(total_w),
              ("cpu {:.1f} · gpu {:.1f}".format(cpu_w, gpu_w)
               if processor.get("cpu_energy_available", True)
-              else "gpu {:.1f} W · cpu n/a".format(gpu_w)), "gauge", total_w),
+              else "gpu {:.1f} W · cpu n/a".format(gpu_w)), "chart", total_w, None),
             ("ctx", "Context", ("{} / {}".format(_tokens(stats.ctx_used), _tokens(stats.ctx_total))
                                 if stats and stats.ctx_total else "--"),
-             "context fill", "gauge", ctx_pct),
+             "context fill", "chart", ctx_pct, 100.0),
             ("cpu", "CPU", "-" if cpu_pct is None else "{:.0f} %".format(cpu_pct),
-             "E/P clusters", "gauge", cpu_pct),
-            ("disk", "Disk", "read {}".format(_format_rate(read)),
-             "write {}".format(_format_rate(disk.get("wbytes_per_s"))), "chart", read or 0.0),
+             "E/P clusters", "chart", cpu_pct, 100.0),
+            ("disk", "Disk read", "read {}".format(_format_rate(read)),
+             "write {}".format(_format_rate(disk.get("wbytes_per_s"))), "chart", read or 0.0, None),
         ]
 
     def _grid(self, parse, args, sensors, stats, width: int, height: int) -> list:
@@ -626,7 +630,7 @@ class ModelView:
         if width >= 100:
             columns, count = 4, 8
         elif width >= 56:
-            columns, count = 2, 6
+            columns, count = 2, 8
         else:
             return []
         # Never draw past the space under the detail card: drop cards until the
@@ -640,10 +644,9 @@ class ModelView:
         card_height = max(4, min(6, height // card_rows))
         card_width = (width - 2 * (columns - 1)) // columns
         # Append one history sample per frame for the scrolling charts.
-        for key, _title, _big, _sub, kind, value in chosen:
-            if kind == "chart":
-                self._history.setdefault(key, [])
-                self._history[key] = (self._history[key] + [float(value or 0.0)])[-64:]
+        for key, _title, _big, _sub, _kind, value, _scale in chosen:
+            self._history.setdefault(key, [])
+            self._history[key] = (self._history[key] + [float(value or 0.0)])[-64:]
 
         lines = []
         for start in range(0, len(chosen), columns):
@@ -659,7 +662,7 @@ class ModelView:
         return lines
 
     def _grid_card(self, card, width: int, height: int) -> list:
-        key, title, big, sub, kind, value = card
+        key, title, big, sub, kind, value, scale = card
         inner = width - 4
         dashes = "\u2500" * max(0, width - 5 - len(title))
         top = [("\u250c\u2500 ", None), (title, BOX), (" ", None), (dashes, None), ("\u2510", None)]
@@ -671,10 +674,10 @@ class ModelView:
                [("\u2502 ", None)] + _value_spans(_pad(big, inner)) + [(" \u2502", None)],
                [("\u2502 ", None)] + _value_spans(_pad(sub, inner)) + [(" \u2502", None)]]
         chart_rows = max(0, height - 4)
-        history = self._history.get(key, []) if kind == "chart" else []
+        history = self._history.get(key, [])
         for index in range(chart_rows):
             if kind == "chart":
-                text = self._chart_line(history, inner, chart_rows, index)
+                text = self._chart_line(history, inner, chart_rows, index, scale)
                 out.append([("\u2502 ", None), (text, OK), (" \u2502", None)])
             else:
                 level = 0.0 if not value else max(0.0, min(1.0, float(value) / 100.0))
@@ -688,9 +691,10 @@ class ModelView:
         out.append(bottom)
         return out
 
-    def _chart_line(self, values: list, width: int, height: int, line: int) -> str:
+    def _chart_line(self, values: list, width: int, height: int, line: int,
+                    scale=None) -> str:
         window = values[-width:]
-        peak = (max(window) if window else 0.0) * 1.25
+        peak = scale if scale else (max(window) if window else 0.0) * 1.25
         peak = peak or 1.0
         text = []
         for offset in range(width):

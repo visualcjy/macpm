@@ -183,9 +183,8 @@ class RenderTests(unittest.TestCase):
         output = buffer.getvalue()
 
         # 72 columns keeps the two-column, six-card layout.
-        for title in ("Speed", "GPU load", "VRAM", "GPU temp", "Power", "Context"):
+        for title in ("Decode", "GPU load", "VRAM", "GPU temp", "Power", "Context", "CPU", "Disk read"):
             self.assertIn(title, output)
-        self.assertNotIn("Disk", output)
 
     def test_wide_terminal_shows_all_eight_cards(self):
         parse = {"processor": {"clusters": [{"name": "E-Cluster", "idle_ratio": 0.5}],
@@ -203,8 +202,8 @@ class RenderTests(unittest.TestCase):
             view.display(parse, types.SimpleNamespace(interval=1), None)
         output = buffer.getvalue()
 
-        for title in ("Speed", "GPU load", "VRAM", "GPU temp",
-                      "Power", "Context", "CPU", "Disk"):
+        for title in ("Decode", "GPU load", "VRAM", "GPU temp",
+                      "Power", "Context", "CPU", "Disk read"):
             self.assertIn(title, output)
 
     def test_cards_and_vram_come_from_the_vendor_gpu_table(self):
