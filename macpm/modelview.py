@@ -446,16 +446,29 @@ class ModelView:
         model = (stats.model if stats and stats.model else service.model) or "-"
         lines = [
             field("model", model),
-            field("backend", "{} · {} family".format(service.label, service.family)),
             field("endpoint", service.endpoint, ADDRESS),
-            field("pids", _pids_text(service)),
             field("state", self._state_detail(stats), MUTED),
         ]
         if stats is not None and stats.state == "live":
             lines += self._metric_lines(stats, field, service)
+        lines = self._pair(lines)
         if stats is not None and stats.note:
             lines.append(field("note", stats.note, HINT))
         return lines
+
+    def _pair(self, lines: list) -> list:
+        """Lay short fields out two per row to keep the card compact."""
+        out = []
+        for index in range(0, len(lines), 2):
+            left = lines[index]
+            right = lines[index + 1] if index + 1 < len(lines) else None
+            text = left[0]
+            if right is not None:
+                text2 = right[0].rstrip()
+                gap = max(2, 40 - len(text))
+                text = text + " " * gap + text2
+            out.append((text, left[1]))
+        return out
 
     def _state_detail(self, stats: Optional[ModelStats]) -> str:
         if stats is None:
@@ -591,9 +604,15 @@ class ModelView:
             columns, count = 2, 6
         else:
             return []
+        # Never draw past the space under the detail card: drop cards until the
+        # remaining ones fit at four rows each.
+        while count and ((count + columns - 1) // columns) * 4 > height:
+            count -= 2
+        if count <= 0:
+            return []
         chosen = cards[:count]
         card_rows = (len(chosen) + columns - 1) // columns
-        card_height = max(5, height // card_rows)
+        card_height = max(4, height // card_rows)
         card_width = (width - 2 * (columns - 1)) // columns
         # Append one history sample per frame for the scrolling charts.
         for key, _title, _big, _sub, kind, value in chosen:
@@ -661,7 +680,8 @@ class ModelView:
     def _box(self, term, top: int, width: int, height: int, title: str,
              lines: list, palette: Palette) -> list:
         inner = max(0, width - 4)
-        out = [term.move(top, 0) + palette.style(TITLE) + _border(width, title) + RESET_FG]
+        out = [term.move(top, 0) + palette.style(BOX) + _border(width, "") + RESET_FG,
+               term.move(top, 2) + palette.style(TITLE) + _fit(" " + title, inner) + RESET_FG]
         body = max(0, height - 2)
         for index in range(body):
             line = lines[index] if index < len(lines) else ""
