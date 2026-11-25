@@ -37,7 +37,9 @@
   (Speed, GPU load, VRAM, GPU temp, Power, Context, CPU, Disk) from 100
   columns, two columns and the six model-relevant ones below that — with the
   cards sourced from the existing IOReport/sysfs sample plus the feed's decode
-  rate.
+  rate.  The detail card now sits above the grid, the grid fills the remaining
+  height, gauges carry the native warning colours and Speed / Disk scroll a
+  history chart instead of a progress bar.
 
 ## 3.3.1 — 2026-11-25
 

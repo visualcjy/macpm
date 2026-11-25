@@ -16,6 +16,10 @@ from .modelfeed import ModelFeed, ModelStats
 from .serviceregistry import Service, ServiceRegistry
 from .theme import (
     ADDRESS,
+    BOX,
+    CRIT,
+    OK,
+    WARN,
     HINT,
     LABEL,
     MUTED,
@@ -152,6 +156,7 @@ class ModelView:
         self._gpu: dict = {}
         self._gpu_at = -1e9
         self._speed_history: list = []
+        self._history: dict = {}
 
     # -- lifecycle / keys --------------------------------------------------
 
@@ -261,18 +266,14 @@ class ModelView:
                              self._empty_lines(inner), palette)
         elif len(ordered) == 1:
             lines = self._detail_lines(ordered[0], inner, stats)
-            grid = self._grid_lines(parse, args, sensors, stats, width, height)
-            top = 0
-            if grid:
-                for index, line in enumerate(grid):
-                    out.append(term.move(index, 0) + _fit(line, width))
-                top = len(grid)
-                remaining = height - 2 - top
-                detail_height = max(4, min(remaining, len(lines) + 2))
-            else:
-                detail_height = min(height - 2, len(lines) + 2)
-            out += self._box(term, top, width, detail_height,
+            detail_height = min(height - 2, len(lines) + 2)
+            grid = self._grid(parse, args, sensors, stats, width, height - 2 - detail_height)
+            out += self._box(term, 0, width, detail_height,
                              " MODEL · {} ".format(ordered[0].label), lines, palette)
+            top = detail_height
+            for index, (text, role) in enumerate(grid):
+                painted = paint_spans([(text, role)], palette, width)
+                out.append(term.move(top + index, 0) + painted)
         else:
             list_height = self._list_height(height, len(ordered))
             out += self._box(term, 0, width, list_height, self._list_title(len(ordered)),
@@ -536,17 +537,16 @@ class ModelView:
 
     # -- wide eight-card grid (form C) -------------------------------------
 
-    def _grid_lines(self, parse, args, sensors, stats: Optional[ModelStats],
-                    width: int = 110, height: int = 30) -> list:
+    def _grid_cards(self, parse, args, sensors, stats):
         interval = max(0.05, float(getattr(args, "interval", 1) or 1))
         processor = (parse or {}).get("processor") or {}
         gpu = (parse or {}).get("gpu") or {}
         disk = (parse or {}).get("disk") or {}
-        clusters = processor.get("clusters") or []
 
         def pct(idle):
             return None if idle is None else max(0.0, min(100.0, (1.0 - idle) * 100.0))
 
+        clusters = processor.get("clusters") or []
         gpu_pct = pct(gpu.get("idle_ratio"))
         cpu_pct = None
         if clusters:
@@ -556,63 +556,98 @@ class ModelView:
         total_w = (processor.get("combined_power") or 0.0) / 1000.0 / interval
         temp = getattr(sensors, "gpu_c", None) if sensors is not None else None
         speed = stats.decode_tps if stats is not None else None
-        if speed:
-            self._speed_history = (self._speed_history + [speed])[-24:]
+        read = disk.get("rbytes_per_s")
+        ctx_pct = _percent(stats.ctx_used, stats.ctx_total) if stats else None
 
         def size(mb):
             return "-" if not mb else "{:.1f} GB".format(mb / 1024.0)
 
-        bars = _BAR_WIDTH[0]
-        cards = [
-            ("Speed", "{:,.1f} tok/s".format(speed) if speed else "--",
-             "now" if speed else "no decoding", self._spark(self._speed_history)),
-            ("GPU load", "-" if gpu_pct is None else "{:.0f} %".format(gpu_pct),
-             (gpu.get("name") or "-")[:24], _bar(gpu_pct, bars)),
-            ("VRAM", "{} / {}".format(size(gpu.get("mem_used_mb")), size(gpu.get("mem_total_mb"))),
+        return [
+            ("speed", "Speed", "{:,.1f} tok/s".format(speed) if speed else "--",
+             "now" if speed else "no decoding", "chart", speed or 0.0),
+            ("gpu", "GPU load", "-" if gpu_pct is None else "{:.0f} %".format(gpu_pct),
+             (gpu.get("name") or "-")[:24], "gauge", gpu_pct),
+            ("vram", "VRAM", "{} / {}".format(size(gpu.get("mem_used_mb")),
+                                              size(gpu.get("mem_total_mb"))),
              ("model " + size((stats.mem_used or 0) / 1024 ** 2)) if stats and stats.mem_used else "-",
-             _bar(100.0 * (gpu.get("mem_used_mb") or 0) / (gpu.get("mem_total_mb") or 1), bars)),
-            ("GPU temp", "-" if temp is None else "{:.0f} C".format(temp), "", _bar(None, bars)),
-            ("Power", "{:.1f} W".format(total_w), "cpu {:.1f} · gpu {:.1f}".format(cpu_w, gpu_w),
-             _bar(min(100.0, total_w), bars)),
-            ("Context", ("{} / {}".format(_tokens(stats.ctx_used), _tokens(stats.ctx_total))
-                         if stats and stats.ctx_total else "--"),
-             "context fill", _bar(_percent(stats.ctx_used, stats.ctx_total) if stats else None, bars)),
-            ("CPU", "-" if cpu_pct is None else "{:.0f} %".format(cpu_pct),
-             "E/P clusters", _bar(cpu_pct, bars)),
-            ("Disk", _format_rate(disk.get("rbytes_per_s")),
-             "write {}".format(_format_rate(disk.get("wbytes_per_s"))), _bar(None, bars)),
+             "gauge", 100.0 * (gpu.get("mem_used_mb") or 0) / (gpu.get("mem_total_mb") or 1)),
+            ("temp", "GPU temp", "-" if temp is None else "{:.0f} C".format(temp), "", "gauge", temp),
+            ("power", "Power", "{:.1f} W".format(total_w),
+             "cpu {:.1f} · gpu {:.1f}".format(cpu_w, gpu_w), "gauge", total_w),
+            ("ctx", "Context", ("{} / {}".format(_tokens(stats.ctx_used), _tokens(stats.ctx_total))
+                                if stats and stats.ctx_total else "--"),
+             "context fill", "gauge", ctx_pct),
+            ("cpu", "CPU", "-" if cpu_pct is None else "{:.0f} %".format(cpu_pct),
+             "E/P clusters", "gauge", cpu_pct),
+            ("disk", "Disk", _format_rate(read),
+             "write {}".format(_format_rate(disk.get("wbytes_per_s"))), "chart", read or 0.0),
         ]
 
+    def _grid(self, parse, args, sensors, stats, width: int, height: int) -> list:
+        cards = self._grid_cards(parse, args, sensors, stats)
         if width >= 100:
             columns, count = 4, 8
         elif width >= 56:
             columns, count = 2, 6
         else:
             return []
-        # Keep at least six rows for the detail card underneath.
-        while count and (count + columns - 1) // columns * 5 + 8 > height:
-            count -= 2
-        if count <= 0:
-            return []
-
-        card_width = (width - 2 * (columns - 1)) // columns
-        _BAR_WIDTH[0] = max(8, card_width - 4)
         chosen = cards[:count]
-        rows = []
-        for start in range(0, len(chosen), columns):
-            group = [self._grid_card(*cards[index], width=card_width)
-                     for index in range(start, min(start + columns, len(chosen)))]
-            for line_index in range(5):
-                rows.append("  ".join(card[line_index] for card in group))
-        _BAR_WIDTH[0] = 20
-        return rows
+        card_rows = (len(chosen) + columns - 1) // columns
+        card_height = max(5, height // card_rows)
+        card_width = (width - 2 * (columns - 1)) // columns
+        # Append one history sample per frame for the scrolling charts.
+        for key, _title, _big, _sub, kind, value in chosen:
+            if kind == "chart":
+                self._history.setdefault(key, [])
+                self._history[key] = (self._history[key] + [float(value or 0.0)])[-64:]
 
-    def _grid_card(self, title: str, big: str, sub: str, bar: str, width: int = 25) -> list:
+        lines = []
+        for start in range(0, len(chosen), columns):
+            group = chosen[start:start + columns]
+            rendered = [self._grid_card(card, card_width, card_height) for card in group]
+            for row in range(card_height):
+                text = "  ".join(item[row][0] for item in rendered)
+                role = rendered[0][row][1]
+                lines.append((text, role))
+        return lines
+
+    def _grid_card(self, card, width: int, height: int) -> list:
+        key, title, big, sub, kind, value = card
         inner = width - 4
         top = "\u250c\u2500 " + title + " " + "\u2500" * max(0, width - 5 - len(title)) + "\u2510"
-        body = [_pad(big, inner), _pad(sub, inner), _pad(bar, inner)]
-        return ([top] + ["\u2502 " + line + " \u2502" for line in body]
-                + ["\u2514" + "\u2500" * (width - 2) + "\u2518"])
+        bottom = ("\u2514" + "\u2500" * (width - 2) + "\u2518", BOX)
+        if height <= 3:
+            return [(top, BOX), ("\u2502 " + _pad(big, inner) + " \u2502", VALUE), bottom]
+        out = [(top, BOX), ("\u2502 " + _pad(big, inner) + " \u2502", VALUE),
+               ("\u2502 " + _pad(sub, inner) + " \u2502", LABEL)]
+        chart_rows = max(0, height - 4)
+        history = self._history.get(key, []) if kind == "chart" else []
+        for index in range(chart_rows):
+            if kind == "chart":
+                text = self._chart_line(history, inner, chart_rows, index)
+                out.append(("\u2502 " + text + " \u2502", OK))
+            else:
+                level = 0.0 if not value else max(0.0, min(1.0, float(value) / 100.0))
+                filled = int(round(level * inner))
+                top_row = chart_rows - 1 - index
+                filled_rows = int(round(level * chart_rows))
+                text = "\u2589" * filled if top_row < filled_rows else " " * inner
+                out.append(("\u2502 " + _pad(text, inner) + " \u2502",
+                            CRIT if (value or 0) >= 85 else WARN if (value or 0) >= 60 else OK))
+        out.append(bottom)
+        return out
+
+    def _chart_line(self, values: list, width: int, height: int, line: int) -> str:
+        window = values[-width:]
+        peak = max(window) if window else 1.0
+        peak = peak or 1.0
+        text = []
+        for offset in range(width):
+            index = offset - (width - len(window))
+            value = window[index] if 0 <= index < len(window) else 0.0
+            level = max(0.0, min(1.0, value / peak)) * height
+            text.append("\u2588" if level > (height - 1 - line) else " ")
+        return "".join(text)
 
     def _spark(self, values: list) -> str:
         if not values:
