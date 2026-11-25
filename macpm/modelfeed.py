@@ -18,7 +18,8 @@ from datetime import datetime, timezone
 from typing import Callable, Optional
 
 from .modellog import (
-    DEFAULT_SPLASH_LOG, CommandTail, HttpTail, LogTail, SplashLogReader,
+    DEFAULT_SPLASH_LOG, CommandTail, HttpTail, JsonLogTail, LogTail,
+    SplashLogReader, docker_log_path,
     parse_vllm_stats,
 )
 from .serviceregistry import Service
@@ -427,6 +428,10 @@ class ModelFeed:
             return None
         if service.backend == "splash":
             return SplashLogReader(os.environ.get("SPLASH_LOG", DEFAULT_SPLASH_LOG))
+        container = os.environ.get(prefix + "_DOCKER")
+        if container:
+            path = docker_log_path(container)
+            return JsonLogTail(path) if path else None
         cmd = os.environ.get(prefix + "_LOG_CMD")
         if cmd:
             import shlex

@@ -184,3 +184,68 @@ def parse_vllm_stats(line: str):
         "kv_pct": float(kv),
         "prefix_hit": float(hit),
     }
+
+
+class JsonLogTail(LogTail):
+    """Docker's json-file driver wraps each line as ``{"log": "..."}``."""
+
+    def read(self) -> list:
+        import json
+
+        lines = []
+        for raw in super().read():
+            try:
+                payload = json.loads(raw)
+            except ValueError:
+                lines.append(raw)
+                continue
+            text = payload.get("log")
+            if text:
+                lines.append(text.rstrip("\n"))
+        return lines
+
+
+def _run(command, timeout: float = 10.0) -> str:
+    try:
+        result = subprocess.run(
+            command, capture_output=True, text=True, timeout=timeout,
+            stdin=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return result.stdout or ""
+
+
+def docker_log_path(container: str) -> str:
+    """Host path of a container's json-file log, or ``""``."""
+    return _run(["docker", "inspect", "--format", "{{.LogPath}}",
+                 container]).strip()
+
+
+_PORTS = re.compile(r"(?:[\d.]+|\*)?:(\d+)->\d+/tcp")
+
+
+def _backend_for(image: str) -> str:
+    image = (image or "").lower()
+    for needle, key in (("sglang", "sglang"), ("vllm", "vllm"),
+                        ("ollama", "ollama"), ("llama", "llama.cpp"),
+                        ("omlx", "omlx"), ("splash", "splash")):
+        if needle in image:
+            return key
+    return "manual"
+
+
+def docker_containers(runner=None) -> list:
+    """Published container ports as ``[(backend, port, name, image)]``."""
+    run = runner or _run
+    out = run(["docker", "ps", "--format",
+               "{{.Names}}|{{.Image}}|{{.Ports}}"])
+    rows = []
+    for line in (out or "").splitlines():
+        parts = line.split("|")
+        if len(parts) < 3:
+            continue
+        name, image, ports = parts[0], parts[1], parts[2]
+        for port in _PORTS.findall(ports):
+            rows.append((_backend_for(image), int(port), name, image))
+    return rows

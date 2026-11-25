@@ -1190,6 +1190,17 @@ def get_avg(inlist):
     return sum(inlist) / len(inlist)
 
 
+def _docker_services():
+    """Published container ports, or None when Docker is not usable."""
+    if os.environ.get("MACPM_DOCKER_DISCOVER", "1") == "0":
+        return None
+    try:
+        from .modellog import docker_containers
+        return lambda: docker_containers()
+    except Exception:
+        return None
+
+
 def begin(stdscr, sampler):
     soc_info_dict = sampler.soc
     capabilities = getattr(sampler, "capabilities", None) or MACOS_CAPABILITIES
@@ -1427,7 +1438,10 @@ def begin(stdscr, sampler):
                     if model_view is None:
                         model_view = ModelView(
                             args.color,
-                            registry=ServiceRegistry(manual=args.model_url),
+                            registry=ServiceRegistry(
+                                manual=args.model_url,
+                                container_source=_docker_services(),
+                            ),
                             no_color=args.no_color,
                             native=getattr(args, "native", False),
                         )

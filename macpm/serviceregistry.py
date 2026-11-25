@@ -208,12 +208,14 @@ class ServiceRegistry:
         process_source: Optional[Callable[[], list]] = None,
         prober: Optional[Callable[[str, int], bool]] = None,
         manual: Iterable[str] = (),
+        container_source: Optional[Callable[[], list]] = None,
     ):
         self.clock = clock
         self.ttl = max(0.0, float(ttl))
         self._process_source = process_source or _psutil_processes
         self._prober = prober or _port_open
         self._manual = [item for item in (manual or ()) if item]
+        self._container_source = container_source
         self._services: list = []
         self._cached_at = -1e9
         self.error = ""
@@ -264,6 +266,25 @@ class ServiceRegistry:
                 service.pids = tuple(sorted(set(service.pids) | {pid}))
                 if service.model == "-" and model != "-":
                     service.model = model
+
+        try:
+            containers = (self._container_source() if self._container_source
+                          else [])
+        except Exception:
+            containers = []
+        for backend, port, _name, _image in containers or []:
+            key = (backend, int(port))
+            groups.setdefault(
+                key,
+                Service(
+                    backend=backend,
+                    family=_BY_KEY.get(backend, Backend(backend, backend, "openai", 0)).family,
+                    host=LOCAL_HOST,
+                    port=int(port),
+                    model="-",
+                    source="container",
+                ),
+            )
 
         for raw in self._manual:
             parsed = parse_endpoint(raw)
