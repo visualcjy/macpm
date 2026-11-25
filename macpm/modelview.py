@@ -442,7 +442,7 @@ class ModelView:
     def _detail_lines(self, service: Service, inner: int,
                       stats: Optional[ModelStats]) -> list:
         def field(name: str, value: str, role: str = VALUE) -> list:
-            return [(_pad(name, 10), LABEL), (_fit(value, inner - 10), role)]
+            return [(_pad(name, 10), KEY), (_fit(value, inner - 10), role)]
 
         model = (stats.model if stats and stats.model else service.model) or "-"
         lines = [
@@ -612,7 +612,7 @@ class ModelView:
             return []
         chosen = cards[:count]
         card_rows = (len(chosen) + columns - 1) // columns
-        card_height = max(4, min(5, height // card_rows))
+        card_height = max(4, min(6, height // card_rows))
         card_width = (width - 2 * (columns - 1)) // columns
         # Append one history sample per frame for the scrolling charts.
         for key, _title, _big, _sub, kind, value in chosen:
@@ -637,32 +637,34 @@ class ModelView:
         key, title, big, sub, kind, value = card
         inner = width - 4
         dashes = "\u2500" * max(0, width - 5 - len(title))
-        top = [("\u250c\u2500 ", BOX), (title, KEY), (" ", BOX), (dashes, BOX), ("\u2510", BOX)]
-        bottom = [("\u2514", BOX), ("\u2500" * (width - 2), BOX), ("\u2518", BOX)]
+        top = [("\u250c\u2500 ", None), (title, TITLE), (" ", None), (dashes, None), ("\u2510", None)]
+        bottom = [("\u2514", None), ("\u2500" * (width - 2), None), ("\u2518", None)]
         if height <= 3:
-            return [top, [("\u2502 ", BOX), (_pad(big, inner), VALUE), (" \u2502", BOX)], bottom]
+            return [top, [("\u2502 ", None), (_pad(big, inner), VALUE), (" \u2502", None)], bottom]
         out = [top,
-               [("\u2502 ", BOX), (_pad(big, inner), VALUE), (" \u2502", BOX)],
-               [("\u2502 ", BOX), (_pad(sub, inner), MUTED), (" \u2502", BOX)]]
+               [("\u2502 ", None), (_pad(big, inner), VALUE), (" \u2502", None)],
+               [("\u2502 ", None), (_pad(sub, inner), LABEL), (" \u2502", None)]]
         chart_rows = max(0, height - 4)
         history = self._history.get(key, []) if kind == "chart" else []
         for index in range(chart_rows):
             if kind == "chart":
                 text = self._chart_line(history, inner, chart_rows, index)
-                out.append([("\u2502 ", BOX), (text, OK), (" \u2502", BOX)])
+                out.append([("\u2502 ", None), (text, OK), (" \u2502", None)])
             else:
                 level = 0.0 if not value else max(0.0, min(1.0, float(value) / 100.0))
-                filled_rows = int(round(level * chart_rows))
-                top_row = chart_rows - 1 - index
-                text = "\u2589" * inner if top_row < filled_rows else " " * inner
+                if index == chart_rows - 1:      # the bar sits on the last row
+                    filled = int(round(level * inner))
+                    text = "\u2589" * filled + " " * (inner - filled)
+                else:
+                    text = " " * inner
                 role = CRIT if (value or 0) >= 85 else WARN if (value or 0) >= 60 else OK
-                out.append([("\u2502 ", BOX), (text, role), (" \u2502", BOX)])
+                out.append([("\u2502 ", None), (text, role), (" \u2502", None)])
         out.append(bottom)
         return out
 
     def _chart_line(self, values: list, width: int, height: int, line: int) -> str:
         window = values[-width:]
-        peak = max(window) if window else 1.0
+        peak = (max(window) if window else 0.0) * 1.25
         peak = peak or 1.0
         text = []
         for offset in range(width):
@@ -684,8 +686,8 @@ class ModelView:
     def _box(self, term, top: int, width: int, height: int, title: str,
              lines: list, palette: Palette) -> list:
         inner = max(0, width - 4)
-        out = [term.move(top, 0) + palette.style(BOX) + _border(width, "") + RESET_FG,
-               term.move(top, 2) + palette.style(KEY) + _fit(" " + title, inner) + RESET_FG]
+        out = [term.move(top, 0) + palette.accent() + _border(width, "") + RESET_FG,
+               term.move(top, 2) + palette.style(TITLE) + _fit(" " + title, inner) + RESET_FG]
         body = max(0, height - 2)
         for index in range(body):
             line = lines[index] if index < len(lines) else ""
@@ -699,11 +701,11 @@ class ModelView:
                 painted = paint_spans([(line, LABEL)], palette, inner)
             out.append(
                 term.move(top + 1 + index, 0)
-                + palette.style(LABEL) + "\u2502 " + painted + palette.style(LABEL)
+                + palette.accent() + "\u2502 " + painted + palette.accent()
                 + " \u2502" + RESET_FG
             )
         out.append(
-            term.move(top + 1 + body, 0) + palette.style(LABEL) + _bottom(width, "")
+            term.move(top + 1 + body, 0) + palette.accent() + _bottom(width, "")
             + RESET_FG
         )
         return out
