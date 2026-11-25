@@ -24,6 +24,14 @@
   and **ollama** (`/api/ps`: loaded model, VRAM, unload countdown — rates stay
   `--` because the endpoint has none). llama.cpp keys come from
   `LLAMACPP_API_KEY`.
+- Model view `recent requests`: the feed reconstructs completions from
+  consecutive polls (a request id that disappears becomes a row with its
+  output tokens, rate and duration) and lists the newest three under the
+  metrics for Splash and oMLX; the row is labelled `recent` because it is
+  client-side derived, not server history.
+- Model view `CARDS` / `VRAM` columns: services are mapped to the vendor GPU
+  table (pid → cards, summed memory) and the columns disappear when no vendor
+  table is available (macOS, DRM-only hosts).
 
 ## 3.3.1 — 2026-11-25
 

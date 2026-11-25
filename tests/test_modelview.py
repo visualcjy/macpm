@@ -6,7 +6,7 @@ import os
 import unittest
 
 from macpm.modelview import ModelView
-from macpm.modelfeed import ModelStats
+from macpm.modelfeed import ModelStats, RequestRow
 from macpm.serviceregistry import Service
 
 
@@ -36,6 +36,9 @@ class FakeFeed:
 
     def maybe_refresh(self):
         self.refreshes += 1
+
+    def recent(self):
+        return list(getattr(self, "recent_rows", []))
 
 
 class FakeRegistry:
@@ -161,6 +164,47 @@ class RenderTests(unittest.TestCase):
         self.assertIn("1.5 GiB", output)
         self.assertIn("24 done", output)
         self.assertIn("thermal nominal", output)
+
+    def test_cards_and_vram_come_from_the_vendor_gpu_table(self):
+        def gpu():
+            return [
+                {"pid": 101, "gpus": [0, 1, 2, 3], "mem_mb": 28672.0},
+                {"pid": 102, "gpus": [0, 1, 2, 3], "mem_mb": 1024.0},
+            ]
+
+        view = ModelView(registry=FakeRegistry([vllm(), llama()]), feed=FakeFeed(),
+                         no_color=True, gpu_source=gpu)
+        view.prime()
+        output = self.render(view)
+
+        self.assertIn("CARDS", output)
+        self.assertIn("0-3", output)
+        self.assertIn("29.0 GiB", output)
+
+    def test_cards_and_vram_are_hidden_without_a_gpu_table(self):
+        view = ModelView(registry=FakeRegistry([vllm()]), feed=FakeFeed(),
+                         no_color=True, gpu_source=lambda: [])
+        view.prime()
+
+        self.assertNotIn("CARDS", self.render(view))
+
+    def test_recent_requests_are_listed_under_the_metrics(self):
+        feed_view = ModelView(
+            registry=FakeRegistry([vllm()]),
+            feed=FakeFeed(ModelStats(state="live", decode_tps=42.0)),
+            no_color=True,
+        )
+        feed_view.feed.recent_rows = [RequestRow(
+            rid="a", finished=1_700_000_000.0, prompt=700, output=1204,
+            tps=42.1, duration=28.6)]
+        feed_view.prime()
+        output = self.render(feed_view)
+
+        self.assertIn("recent", output)
+        self.assertIn("done", output)
+        self.assertIn("1.2K", output)
+        self.assertIn("42.1 tok/s", output)
+        self.assertIn("29s", output)
 
     def test_auth_failure_is_named(self):
         stats = ModelStats(state="auth", note="HTTP 401")

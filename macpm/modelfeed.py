@@ -59,6 +59,21 @@ class ModelStats:
     thermal: str = ""
     note: str = ""
     at: float = 0.0
+    # Live request rows used to reconstruct completions; not rendered directly.
+    active_rows: list = field(default_factory=list)
+
+
+@dataclass
+class RequestRow:
+    """One completion the feed reconstructed from consecutive polls."""
+
+    rid: str
+    finished: float
+    status: str = "done"
+    prompt: Optional[int] = None
+    output: Optional[int] = None
+    tps: Optional[float] = None
+    duration: float = 0.0
 
 
 def _http_json(host: str, port: int, path: str, key: str = "") -> dict:
@@ -145,6 +160,15 @@ def parse_splash(payload: dict, at: float = 0.0) -> ModelStats:
         int(row.get("prompt_tokens") or 0) + int(row.get("generated_tokens") or 0)
         for row in active
     ) or None
+    stats.active_rows = [
+        {
+            "rid": str(row.get("id") or row.get("request_id") or ""),
+            "prompt": _int(row.get("prompt_tokens")),
+            "output": _int(row.get("generated_tokens")),
+        }
+        for row in active
+        if row.get("id") or row.get("request_id")
+    ]
     stats.ctx_total = _int(payload.get("maximum_context_tokens")) or _int(
         (payload.get("capabilities") or {}).get("max_context_tokens")
     )
@@ -217,6 +241,15 @@ def parse_omlx(payload: dict, at: float = 0.0) -> ModelStats:
         int(row.get("prompt_tokens") or 0) + int(row.get("generated_tokens") or 0)
         for row in generating + prefilling
     ) or None
+    stats.active_rows = [
+        {
+            "rid": str(row.get("request_id") or ""),
+            "prompt": _int(row.get("prompt_tokens")),
+            "output": _int(row.get("generated_tokens")),
+        }
+        for row in generating + prefilling
+        if row.get("request_id")
+    ]
     stats.mem_used = _number(active.get("model_memory_used"))
     stats.mem_peak = _number(active.get("model_memory_max"))
     stats.requests = _int(active.get("total_active_requests"))
@@ -295,6 +328,8 @@ class ModelFeed:
         self._next = 0.0
         self._thread: Optional[threading.Thread] = None
         self._at = 0.0
+        self._recent: list = []
+        self._active: dict = {}
 
     # -- selection ---------------------------------------------------------
 
@@ -307,10 +342,47 @@ class ModelFeed:
             self._service = service
             self._stats = None
             self._next = 0.0
+            self._recent = []
+            self._active = {}
 
     def snapshot(self) -> Optional[ModelStats]:
         with self._lock:
             return self._stats
+
+    def recent(self) -> list:
+        with self._lock:
+            return list(self._recent)
+
+    def _track(self, stats: ModelStats) -> None:
+        """Turn disappeared request ids into completed rows (client-side)."""
+        now = self.clock()
+        seen = {}
+        for row in stats.active_rows:
+            rid = row.get("rid") or ""
+            if not rid:
+                continue
+            seen[rid] = row
+            start, prompt, _ = self._active.get(rid, (now, row.get("prompt"), 0))
+            self._active[rid] = (
+                start,
+                prompt if prompt is not None else row.get("prompt"),
+                row.get("output") or 0,
+            )
+        for rid, (start, prompt, output) in list(self._active.items()):
+            if rid in seen:
+                continue
+            duration = max(0.0, now - start)
+            tps = (output / duration) if duration > 0 and output else None
+            self._recent.insert(0, RequestRow(
+                rid=rid,
+                finished=now,
+                prompt=prompt,
+                output=output,
+                tps=tps,
+                duration=duration,
+            ))
+            del self._active[rid]
+        del self._recent[8:]
 
     # -- polling -----------------------------------------------------------
 
@@ -345,6 +417,7 @@ class ModelFeed:
             # Drop the result if the user moved on to another service.
             if self._service is not None and self._service.identity == service.identity:
                 self._stats = stats
+                self._track(stats)
 
 
 def _fetch_splash(service: Service, key: str) -> ModelStats:

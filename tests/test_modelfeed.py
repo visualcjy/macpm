@@ -8,6 +8,7 @@ import urllib.error
 
 from macpm.modelfeed import (
     ModelFeed,
+    RequestRow,
     ModelStats,
     fetch_stats,
     parse_llamacpp,
@@ -291,6 +292,36 @@ class MockServerTests(unittest.TestCase):
 
         headers = [auth for path, auth in MockHandler.seen if path == "/props"]
         self.assertEqual(headers, ["Bearer secret"])
+
+
+
+
+class RecentRequestTests(unittest.TestCase):
+    def test_a_request_that_disappears_becomes_a_completed_row(self):
+        now = [100.0]
+        feed = ModelFeed(clock=lambda: now[0])
+
+        feed._track(ModelStats(state="live", active_rows=[
+            {"rid": "a", "prompt": 100, "output": 10}]))
+        now[0] += 2.0
+        feed._track(ModelStats(state="live", active_rows=[
+            {"rid": "a", "prompt": 100, "output": 90}]))
+        now[0] += 1.0
+        feed._track(ModelStats(state="live", active_rows=[]))
+
+        rows = feed.recent()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].prompt, 100)
+        self.assertEqual(rows[0].output, 90)
+        self.assertAlmostEqual(rows[0].duration, 3.0)
+        self.assertAlmostEqual(rows[0].tps, 30.0)
+
+    def test_switching_service_clears_the_history(self):
+        feed = ModelFeed(clock=lambda: 1.0)
+        feed._track(ModelStats(state="live", active_rows=[]))
+        feed.select(Service("splash", "native", "127.0.0.1", 8000, "x", (1,)))
+
+        self.assertEqual(feed.recent(), [])
 
 
 if __name__ == "__main__":

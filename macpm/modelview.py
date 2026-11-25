@@ -83,6 +83,15 @@ def _duration(seconds: float) -> str:
     return "{}s".format(seconds)
 
 
+def _cards_text(cards: list) -> str:
+    if not cards:
+        return "-"
+    ordered = sorted(set(cards))
+    if ordered == list(range(ordered[0], ordered[-1] + 1)):
+        return str(ordered[0]) if len(ordered) == 1 else "{}-{}".format(ordered[0], ordered[-1])
+    return ",".join(str(card) for card in ordered)
+
+
 def _percent(used: Optional[float], total: Optional[float]) -> Optional[int]:
     if not used or not total:
         return None
@@ -100,6 +109,7 @@ class ModelView:
         no_color: bool = False,
         native: bool = False,
         interval: float = 2.0,
+        gpu_source=None,
     ):
         self.color = color
         self.no_color = no_color
@@ -115,6 +125,9 @@ class ModelView:
         self.ready = False
         self._last_scan = 0.0
         self._term: Optional[Terminal] = None
+        self.gpu_source = gpu_source
+        self._gpu: dict = {}
+        self._gpu_at = -1e9
 
     # -- lifecycle / keys --------------------------------------------------
 
@@ -288,41 +301,92 @@ class ModelView:
         return lines
 
     def _columns(self, inner: int) -> tuple:
-        """Model, backend and endpoint widths for one row."""
-        backend, endpoint, state = 9, 15, _STATE_WIDTH
-        fixed = 2 + 1 + backend + 1 + endpoint + 1 + state
+        """Model, backend, endpoint, cards and vram widths for one row."""
+        backend, endpoint, cards, vram, state = 9, 15, 6, 9, _STATE_WIDTH
+        fixed = (2 + 1 + backend + 1 + endpoint + 1 + cards + 1 + vram
+                 + 1 + state)
         model = inner - fixed
-        if model < 16:                       # narrow: drop the endpoint
+        if model < 16:                       # narrow: drop cards + vram
+            cards = vram = 0
+            fixed = 2 + 1 + backend + 1 + endpoint + 1 + state
+            model = inner - fixed
+        if model < 16:                       # narrower: drop the endpoint
             endpoint = 0
+            cards = vram = 0
             fixed = 2 + 1 + backend + 1 + state
             model = inner - fixed
         if model < 10:                       # very narrow: model + state
             backend = 0
             fixed = 2 + 1 + state
             model = inner - fixed
-        return max(6, min(model, 40)), backend, endpoint
+        if not self._gpu_index():            # no vendor table: nothing to show
+            cards = vram = 0
+        return max(6, min(model, 40)), backend, endpoint, cards, vram
 
     def _header_line(self, inner: int) -> str:
-        model, backend, endpoint = self._columns(inner)
+        model, backend, endpoint, cards, vram = self._columns(inner)
         text = "  " + _pad("MODEL", model)
         if backend:
             text += " " + _pad("BACKEND", backend)
         if endpoint:
             text += " " + _pad("ENDPOINT", endpoint)
+        if cards:
+            text += " " + _pad("CARDS", cards)
+        if vram:
+            text += " " + _pad("VRAM", vram, right=True)
         text += " " + _pad("STATE", _STATE_WIDTH, right=True)
         return _fit(text, inner)
 
     def _row_line(self, service: Service, selected: bool, inner: int,
                   stats: Optional[ModelStats]) -> tuple:
-        model, backend, endpoint = self._columns(inner)
+        model, backend, endpoint, cards, vram = self._columns(inner)
         text = ("\u25b6 " if selected else "  ") + _pad(_fit(service.model, model), model)
         if backend:
             text += " " + _pad(_fit(service.label, backend), backend)
         if endpoint:
             text += " " + _pad(service.endpoint, endpoint)
+        if cards:
+            usage = self._service_gpu(service)
+            text += " " + _pad(usage[0] if usage else "-", cards)
+        if vram:
+            usage = self._service_gpu(service)
+            text += " " + _pad(_gib(usage[1]) if usage else "-", vram, right=True)
         state = self._state_text(stats) if selected else "unverified"
         text += " " + _pad(state, _STATE_WIDTH, right=True)
         return (_fit(text, inner), TITLE if selected else LABEL)
+
+    def _gpu_index(self) -> dict:
+        """``pid -> (cards, bytes)`` from the vendor table, cached briefly."""
+        now = time.monotonic()
+        if now - self._gpu_at < 5.0:
+            return self._gpu
+        rows = {}
+        try:
+            source = self.gpu_source
+            if source is None:
+                from .backend import gpu_process_source
+                source = gpu_process_source()
+            for row in (list(source()) if source else []):
+                rows[int(row.get("pid", 0))] = (
+                    list(row.get("gpus") or []),
+                    float(row.get("mem_mb") or 0.0) * 1024 * 1024,
+                )
+        except Exception:
+            rows = {}
+        self._gpu, self._gpu_at = rows, now
+        return rows
+
+    def _service_gpu(self, service: Service):
+        index = self._gpu_index()
+        cards, memory = set(), 0.0
+        for pid in service.pids:
+            entry = index.get(pid)
+            if entry:
+                cards.update(entry[0])
+                memory += entry[1]
+        if not cards and memory <= 0:
+            return None
+        return (_cards_text(cards), memory)
 
     def _state_text(self, stats: Optional[ModelStats]) -> str:
         if stats is None:
@@ -353,7 +417,7 @@ class ModelView:
             field("state", self._state_detail(stats), MUTED),
         ]
         if stats is not None and stats.state == "live":
-            lines += self._metric_lines(stats, field)
+            lines += self._metric_lines(stats, field, service)
         if stats is not None and stats.note:
             lines.append(field("note", stats.note, HINT))
         return lines
@@ -378,7 +442,7 @@ class ModelView:
             return "stale"
         return "error"
 
-    def _metric_lines(self, stats: ModelStats, field) -> list:
+    def _metric_lines(self, stats: ModelStats, field, service: Service) -> list:
         lines = []
         rates = "decode {}   prefill {}".format(_rate(stats.decode_tps), _rate(stats.prefill_tps))
         lines.append(field("rates", rates))
@@ -406,6 +470,9 @@ class ModelView:
             text = "{} / {}".format(_gib(stats.kv_used), _gib(stats.kv_total))
             pct = _percent(stats.kv_used, stats.kv_total)
             lines.append(field("kv", text + ("  {}%".format(pct) if pct is not None else "")))
+        usage = self._service_gpu(service)
+        if usage is not None:
+            lines.append(field("gpu", "cards {} · {}".format(usage[0], _gib(usage[1]))))
         if stats.mem_used is not None:
             text = _gib(stats.mem_used)
             if stats.mem_peak:
@@ -422,6 +489,15 @@ class ModelView:
             lines.append(field("tokens", "{:,} generated".format(stats.tokens_total)))
         if stats.expires_s is not None:
             lines.append(field("unload", "in {}".format(_duration(stats.expires_s))))
+        for index, row in enumerate(self.feed.recent()[:3]):
+            text = "{}  {}  out {}  {}  {}".format(
+                time.strftime("%H:%M:%S", time.localtime(row.finished)),
+                row.status,
+                _tokens(row.output),
+                _rate(row.tps) if row.tps else "-",
+                _duration(row.duration),
+            )
+            lines.append(field("recent" if index == 0 else "", text, MUTED))
         return lines
 
     # -- painting ----------------------------------------------------------
