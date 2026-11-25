@@ -18,6 +18,7 @@ from .theme import (
     ADDRESS,
     BOX,
     CRIT,
+    KEY,
     OK,
     WARN,
     HINT,
@@ -271,8 +272,8 @@ class ModelView:
             out += self._box(term, 0, width, detail_height,
                              " MODEL · {} ".format(ordered[0].label), lines, palette)
             top = detail_height
-            for index, (text, role) in enumerate(grid):
-                painted = paint_spans([(text, role)], palette, width)
+            for index, spans in enumerate(grid):
+                painted = paint_spans(spans, palette, width)
                 out.append(term.move(top + index, 0) + painted)
         else:
             list_height = self._list_height(height, len(ordered))
@@ -440,8 +441,8 @@ class ModelView:
 
     def _detail_lines(self, service: Service, inner: int,
                       stats: Optional[ModelStats]) -> list:
-        def field(name: str, value: str, role: str = VALUE) -> tuple:
-            return (_pad(name, 10) + _fit(value, inner - 10), role)
+        def field(name: str, value: str, role: str = VALUE) -> list:
+            return [(_pad(name, 10), LABEL), (_fit(value, inner - 10), role)]
 
         model = (stats.model if stats and stats.model else service.model) or "-"
         lines = [
@@ -460,14 +461,13 @@ class ModelView:
         """Lay short fields out two per row to keep the card compact."""
         out = []
         for index in range(0, len(lines), 2):
-            left = lines[index]
-            right = lines[index + 1] if index + 1 < len(lines) else None
-            text = left[0]
-            if right is not None:
-                text2 = right[0].rstrip()
-                gap = max(2, 40 - len(text))
-                text = text + " " * gap + text2
-            out.append((text, left[1]))
+            left = list(lines[index])
+            width = sum(len(text) for text, _role in left)
+            row = left
+            if index + 1 < len(lines):
+                gap = max(2, 40 - width)
+                row = left + [(" " * gap, LABEL)] + list(lines[index + 1])
+            out.append(row)
         return out
 
     def _state_detail(self, stats: Optional[ModelStats]) -> str:
@@ -612,7 +612,7 @@ class ModelView:
             return []
         chosen = cards[:count]
         card_rows = (len(chosen) + columns - 1) // columns
-        card_height = max(4, height // card_rows)
+        card_height = max(4, min(5, height // card_rows))
         card_width = (width - 2 * (columns - 1)) // columns
         # Append one history sample per frame for the scrolling charts.
         for key, _title, _big, _sub, kind, value in chosen:
@@ -625,34 +625,38 @@ class ModelView:
             group = chosen[start:start + columns]
             rendered = [self._grid_card(card, card_width, card_height) for card in group]
             for row in range(card_height):
-                text = "  ".join(item[row][0] for item in rendered)
-                role = rendered[0][row][1]
-                lines.append((text, role))
+                spans = []
+                for position, item in enumerate(rendered):
+                    if position:
+                        spans.append(("  ", LABEL))
+                    spans.extend(item[row])
+                lines.append(spans)
         return lines
 
     def _grid_card(self, card, width: int, height: int) -> list:
         key, title, big, sub, kind, value = card
         inner = width - 4
-        top = "\u250c\u2500 " + title + " " + "\u2500" * max(0, width - 5 - len(title)) + "\u2510"
-        bottom = ("\u2514" + "\u2500" * (width - 2) + "\u2518", BOX)
+        dashes = "\u2500" * max(0, width - 5 - len(title))
+        top = [("\u250c\u2500 ", BOX), (title, KEY), (" ", BOX), (dashes, BOX), ("\u2510", BOX)]
+        bottom = [("\u2514", BOX), ("\u2500" * (width - 2), BOX), ("\u2518", BOX)]
         if height <= 3:
-            return [(top, BOX), ("\u2502 " + _pad(big, inner) + " \u2502", VALUE), bottom]
-        out = [(top, BOX), ("\u2502 " + _pad(big, inner) + " \u2502", VALUE),
-               ("\u2502 " + _pad(sub, inner) + " \u2502", LABEL)]
+            return [top, [("\u2502 ", BOX), (_pad(big, inner), VALUE), (" \u2502", BOX)], bottom]
+        out = [top,
+               [("\u2502 ", BOX), (_pad(big, inner), VALUE), (" \u2502", BOX)],
+               [("\u2502 ", BOX), (_pad(sub, inner), MUTED), (" \u2502", BOX)]]
         chart_rows = max(0, height - 4)
         history = self._history.get(key, []) if kind == "chart" else []
         for index in range(chart_rows):
             if kind == "chart":
                 text = self._chart_line(history, inner, chart_rows, index)
-                out.append(("\u2502 " + text + " \u2502", OK))
+                out.append([("\u2502 ", BOX), (text, OK), (" \u2502", BOX)])
             else:
                 level = 0.0 if not value else max(0.0, min(1.0, float(value) / 100.0))
-                filled = int(round(level * inner))
-                top_row = chart_rows - 1 - index
                 filled_rows = int(round(level * chart_rows))
-                text = "\u2589" * filled if top_row < filled_rows else " " * inner
-                out.append(("\u2502 " + _pad(text, inner) + " \u2502",
-                            CRIT if (value or 0) >= 85 else WARN if (value or 0) >= 60 else OK))
+                top_row = chart_rows - 1 - index
+                text = "\u2589" * inner if top_row < filled_rows else " " * inner
+                role = CRIT if (value or 0) >= 85 else WARN if (value or 0) >= 60 else OK
+                out.append([("\u2502 ", BOX), (text, role), (" \u2502", BOX)])
         out.append(bottom)
         return out
 
@@ -681,13 +685,16 @@ class ModelView:
              lines: list, palette: Palette) -> list:
         inner = max(0, width - 4)
         out = [term.move(top, 0) + palette.style(BOX) + _border(width, "") + RESET_FG,
-               term.move(top, 2) + palette.style(TITLE) + _fit(" " + title, inner) + RESET_FG]
+               term.move(top, 2) + palette.style(KEY) + _fit(" " + title, inner) + RESET_FG]
         body = max(0, height - 2)
         for index in range(body):
             line = lines[index] if index < len(lines) else ""
             if isinstance(line, tuple):
                 text, role = line
                 painted = paint_spans([(text, role or LABEL)], palette, inner)
+            elif isinstance(line, list):
+                painted = paint_spans([(text, role or LABEL) for text, role in line],
+                                      palette, inner)
             else:
                 painted = paint_spans([(line, LABEL)], palette, inner)
             out.append(
