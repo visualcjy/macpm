@@ -175,8 +175,8 @@ class RenderTests(unittest.TestCase):
         view = ModelView(registry=FakeRegistry([vllm()]), feed=FakeFeed(),
                          no_color=True, gpu_source=lambda: [])
         view.prime()
-        os.environ["COLUMNS"] = "110"
-        os.environ["LINES"] = "34"
+        os.environ["COLUMNS"] = "72"
+        os.environ["LINES"] = "28"
         buffer = io.StringIO()
         with contextlib.redirect_stdout(buffer):
             view.display(parse, types.SimpleNamespace(interval=1), None)

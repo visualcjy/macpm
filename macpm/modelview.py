@@ -96,6 +96,9 @@ def _format_rate(bps) -> str:
     return "{:.0f} B/s".format(bps)
 
 
+_BAR_WIDTH = [20]
+
+
 def _bar(percent, width: int = 20) -> str:
     if percent is None:
         return " " * width
@@ -258,7 +261,7 @@ class ModelView:
                              self._empty_lines(inner), palette)
         elif len(ordered) == 1:
             lines = self._detail_lines(ordered[0], inner, stats)
-            grid = self._grid_lines(parse, args, sensors, stats) if width >= 110 and height >= 26 else []
+            grid = self._grid_lines(parse, args, sensors, stats, width, height)
             top = 0
             if grid:
                 out += grid
@@ -532,9 +535,9 @@ class ModelView:
 
     # -- wide eight-card grid (form C) -------------------------------------
 
-    def _grid_lines(self, parse, args, sensors, stats: Optional[ModelStats]) -> list:
+    def _grid_lines(self, parse, args, sensors, stats: Optional[ModelStats],
+                    width: int = 110, height: int = 30) -> list:
         interval = max(0.05, float(getattr(args, "interval", 1) or 1))
-        args = args if args is not None else type("A", (), {"interval": 1.0})()
         processor = (parse or {}).get("processor") or {}
         gpu = (parse or {}).get("gpu") or {}
         disk = (parse or {}).get("disk") or {}
@@ -558,39 +561,54 @@ class ModelView:
         def size(mb):
             return "-" if not mb else "{:.1f} GB".format(mb / 1024.0)
 
-        def rate(bps):
-            return "-" if bps is None else _format_rate(bps)
-
+        bars = _BAR_WIDTH[0]
         cards = [
-            ("Speed", "{}".format("{:,.1f} tok/s".format(speed) if speed else "--"),
+            ("Speed", "{:,.1f} tok/s".format(speed) if speed else "--",
              "now" if speed else "no decoding", self._spark(self._speed_history)),
             ("GPU load", "-" if gpu_pct is None else "{:.0f} %".format(gpu_pct),
-             (gpu.get("name") or "-")[:20], _bar(gpu_pct)),
+             (gpu.get("name") or "-")[:24], _bar(gpu_pct, bars)),
             ("VRAM", "{} / {}".format(size(gpu.get("mem_used_mb")), size(gpu.get("mem_total_mb"))),
              ("model " + size((stats.mem_used or 0) / 1024 ** 2)) if stats and stats.mem_used else "-",
-             _bar(100.0 * (gpu.get("mem_used_mb") or 0) / (gpu.get("mem_total_mb") or 1))),
-            ("GPU temp", "-" if temp is None else "{:.0f} C".format(temp), "", _bar(None)),
+             _bar(100.0 * (gpu.get("mem_used_mb") or 0) / (gpu.get("mem_total_mb") or 1), bars)),
+            ("GPU temp", "-" if temp is None else "{:.0f} C".format(temp), "", _bar(None, bars)),
             ("Power", "{:.1f} W".format(total_w), "cpu {:.1f} · gpu {:.1f}".format(cpu_w, gpu_w),
-             _bar(min(100.0, total_w / 1.0))),
+             _bar(min(100.0, total_w), bars)),
             ("Context", ("{} / {}".format(_tokens(stats.ctx_used), _tokens(stats.ctx_total))
                          if stats and stats.ctx_total else "--"),
-             "context fill", _bar(_percent(stats.ctx_used, stats.ctx_total) if stats else None)),
+             "context fill", _bar(_percent(stats.ctx_used, stats.ctx_total) if stats else None, bars)),
             ("CPU", "-" if cpu_pct is None else "{:.0f} %".format(cpu_pct),
-             "E/P clusters", _bar(cpu_pct)),
-            ("Disk", rate(disk.get("rbytes_per_s")),
-             "write {}".format(rate(disk.get("wbytes_per_s"))), _bar(None)),
+             "E/P clusters", _bar(cpu_pct, bars)),
+            ("Disk", _format_rate(disk.get("rbytes_per_s")),
+             "write {}".format(_format_rate(disk.get("wbytes_per_s"))), _bar(None, bars)),
         ]
+
+        if width >= 100:
+            columns, count = 4, 8
+        elif width >= 56:
+            columns, count = 2, 6
+        else:
+            return []
+        # Keep at least six rows for the detail card underneath.
+        while count and (count + columns - 1) // columns * 5 + 8 > height:
+            count -= 2
+        if count <= 0:
+            return []
+
+        card_width = (width - 2 * (columns - 1)) // columns
+        _BAR_WIDTH[0] = max(8, card_width - 4)
+        chosen = cards[:count]
         rows = []
-        for start in range(0, 8, 4):
-            group = [self._card(*card) for card in cards[start:start + 4]]
+        for start in range(0, len(chosen), columns):
+            group = [self._grid_card(*cards[index], width=card_width)
+                     for index in range(start, min(start + columns, len(chosen)))]
             for line_index in range(5):
                 rows.append("  ".join(card[line_index] for card in group))
+        _BAR_WIDTH[0] = 20
         return rows
 
-    def _card(self, title: str, big: str, sub: str, bar: str) -> list:
-        width = 25
+    def _grid_card(self, title: str, big: str, sub: str, bar: str, width: int = 25) -> list:
         inner = width - 4
-        top = "┌─ " + title + " " + "─" * max(0, width - 5 - len(title)) + "┐"
+        top = "\u250c\u2500 " + title + " " + "\u2500" * max(0, width - 5 - len(title)) + "\u2510"
         body = [_pad(big, inner), _pad(sub, inner), _pad(bar, inner)]
         return ([top] + ["\u2502 " + line + " \u2502" for line in body]
                 + ["\u2514" + "\u2500" * (width - 2) + "\u2518"])

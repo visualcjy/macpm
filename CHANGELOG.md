@@ -32,10 +32,12 @@
 - Model view `CARDS` / `VRAM` columns: services are mapped to the vendor GPU
   table (pid → cards, summed memory) and the columns disappear when no vendor
   table is available (macOS, DRM-only hosts).
-- Model view wide layout (form C): at 110×26 or larger a single service shows
-  the eight-card grid — Speed, GPU load, VRAM, GPU temp, Power, Context, CPU
-  and Disk — sourced from the existing IOReport/sysfs sample plus the feed's
-  decode rate, with the detail card underneath.
+- Model view card grid: a single service now shows metric cards above the
+  detail panel at any width ≥56 — four columns and all eight
+  (Speed, GPU load, VRAM, GPU temp, Power, Context, CPU, Disk) from 100
+  columns, two columns and the six model-relevant ones below that — with the
+  cards sourced from the existing IOReport/sysfs sample plus the feed's decode
+  rate.
 
 ## 3.3.1 — 2026-11-25
 
