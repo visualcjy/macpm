@@ -612,10 +612,12 @@ class ModelView:
              ("model " + size((stats.mem_used or 0) / 1024 ** 2)) if stats and stats.mem_used else "-",
              "chart", 100.0 * (gpu.get("mem_used_mb") or 0) / (gpu.get("mem_total_mb") or 1), 100.0),
             ("temp", "GPU temp", "-" if temp is None else "{:.0f} C".format(temp), "", "chart", temp, 100.0),
-            ("power", "Power", "{:.1f} W".format(total_w),
+            ("power", "Power", "{:.2f} W".format(
+                total_w if processor.get("cpu_energy_available", True) else gpu_w),
              ("cpu {:.1f} · gpu {:.1f}".format(cpu_w, gpu_w)
               if processor.get("cpu_energy_available", True)
-              else "gpu {:.1f} W · cpu n/a".format(gpu_w)), "chart", total_w, None),
+              else "gpu {:.2f} W · cpu n/a".format(gpu_w)), "chart",
+             total_w if processor.get("cpu_energy_available", True) else gpu_w, None),
             ("ctx", "Context", ("{} / {}".format(_tokens(stats.ctx_used), _tokens(stats.ctx_total))
                                 if stats and stats.ctx_total else "--"),
              "context fill", "chart", ctx_pct, 100.0),
@@ -672,7 +674,9 @@ class ModelView:
                     + [(" \u2502", None)], bottom]
         out = [top,
                [("\u2502 ", None)] + _value_spans(_pad(big, inner)) + [(" \u2502", None)],
-               [("\u2502 ", None)] + _value_spans(_pad(sub, inner)) + [(" \u2502", None)]]
+               [("\u2502 ", None)]
+               + ([(_pad(sub, inner), LABEL)] if key == "disk"
+                  else _value_spans(_pad(sub, inner))) + [(" \u2502", None)]]
         chart_rows = max(0, height - 4)
         history = self._history.get(key, [])
         for index in range(chart_rows):
