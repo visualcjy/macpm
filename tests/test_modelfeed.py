@@ -410,5 +410,23 @@ class RateDerivationTests(unittest.TestCase):
         self.assertAlmostEqual(second.prefill_tps, 500.0)
 
 
+
+
+class ObservedDecodeTests(unittest.TestCase):
+    def test_tokens_per_second_between_polls(self):
+        now = [100.0]
+        feed = ModelFeed(clock=lambda: now[0])
+        service = Service("splash", "native", "127.0.0.1", 8000, "m", (1,))
+        first = ModelStats(state="live", active_rows=[{"rid": "a", "output": 10}])
+        feed._observe_decode(service, first)
+        self.assertIsNone(first.decode_observed)
+
+        now[0] += 2.0
+        second = ModelStats(state="live", active_rows=[{"rid": "a", "output": 70}])
+        feed._observe_decode(service, second)
+
+        self.assertAlmostEqual(second.decode_observed, 30.0)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -614,7 +614,8 @@ class ModelView:
         gpu_w = (processor.get("gpu_energy") or 0.0) / 1000.0 / interval
         total_w = (processor.get("combined_power") or 0.0) / 1000.0 / interval
         temp = getattr(sensors, "gpu_c", None) if sensors is not None else None
-        speed = stats.decode_tps if stats is not None else None
+        speed = None if stats is None else (stats.decode_observed
+                                         if stats.decode_observed is not None else stats.decode_tps)
         read = disk.get("rbytes_per_s")
         ctx_pct = _percent(stats.ctx_used, stats.ctx_total) if stats else None
 

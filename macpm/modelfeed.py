@@ -53,6 +53,7 @@ class ModelStats:
     kv_used: Optional[float] = None     # bytes
     kv_total: Optional[float] = None    # bytes
     kv_pct: Optional[float] = None      # 0-100 when the server reports a ratio
+    decode_observed: Optional[float] = None   # tokens/s seen between polls
     gen_tokens: Optional[int] = None    # counters kept for client-side rates
     prompt_tokens: Optional[int] = None
     mem_used: Optional[float] = None    # bytes
@@ -383,6 +384,7 @@ class ModelFeed:
         self._recent: list = []
         self._active: dict = {}
         self._counters: dict = {}
+        self._decode_state: dict = {}
 
     # -- selection ---------------------------------------------------------
 
@@ -398,6 +400,7 @@ class ModelFeed:
             self._recent = []
             self._active = {}
             self._counters = {}
+            self._decode_state = {}
 
     def snapshot(self) -> Optional[ModelStats]:
         with self._lock:
@@ -406,6 +409,20 @@ class ModelFeed:
     def recent(self) -> list:
         with self._lock:
             return list(self._recent)
+
+    def _observe_decode(self, service: Service, stats: ModelStats) -> None:
+        """Tokens/s actually produced between two polls, like the dashboard."""
+        outputs = sum(int(row.get("output") or 0) for row in stats.active_rows)
+        now = self.clock()
+        previous = self._decode_state.get(service.identity)
+        self._decode_state[service.identity] = (outputs, now)
+        if previous is None:
+            return
+        tokens0, at0 = previous
+        elapsed = now - at0
+        if elapsed <= 0.2:
+            return
+        stats.decode_observed = max(0.0, outputs - tokens0) / elapsed
 
     def _derive_rates(self, service: Service, stats: ModelStats) -> None:
         """vLLM/SGLang only expose token counters: diff them into tok/s."""
@@ -496,6 +513,7 @@ class ModelFeed:
         with self._lock:
             # Drop the result if the user moved on to another service.
             if self._service is not None and self._service.identity == service.identity:
+                self._observe_decode(service, stats)
                 self._derive_rates(service, stats)
                 self._stats = stats
                 self._track(stats)
