@@ -27,6 +27,8 @@ from .processes import ProcessView
 from .backend import create_sampler, platform_name
 from .capabilities import MACOS_CAPABILITIES
 from .gpuview import GpuView
+from .modelview import ModelView
+from .serviceregistry import ServiceRegistry
 from .sensors import SensorReader
 from .theme import BOX, NATIVE, Palette, footer_spans, paint_spans
 from .tui import RESET_FG, _pad, footer
@@ -133,6 +135,9 @@ parser.add_argument('--show_cores', nargs='?', const=True, default=False, type=_
                     help='Choose show cores mode')
 parser.add_argument('--no-public-ip', action='store_true', default=False,
                     help='do not look up the public IP and location')
+parser.add_argument('--model-url', action='append', default=[], metavar='URL',
+                    help='model service endpoint for the model view '
+                         '(host:port or http://host:port; repeatable)')
 parser.add_argument('--version', action='version', version=version)
 
 args = parser.parse_args()
@@ -1195,6 +1200,7 @@ def begin(stdscr, sampler):
     process_view = None
     network_view = None
     gpu_view = None
+    model_view = None
     process_summary = []
     powermetrics_parse = None
     stdscr.nodelay(True)
@@ -1237,12 +1243,15 @@ def begin(stdscr, sampler):
                     network_view.sample()
                 if view == 5 and gpu_view is not None:
                     gpu_view.sample()
+                if view == 6 and model_view is not None:
+                    model_view.sample()
 
             # Poll keys between samples so scrolling and view changes stay
             # responsive instead of queueing one key per refresh.
             redraw_process = tick
             redraw_network = tick
             redraw_gpu = tick
+            redraw_model = tick
             redraw_metrics = False
             refresh_metrics = False
 
@@ -1271,6 +1280,11 @@ def begin(stdscr, sampler):
                         gpu_view.no_color = args.no_color
                         gpu_view.native = args.native
                         redraw_gpu = True
+                    elif view == 6 and model_view is not None:
+                        model_view.color = args.color
+                        model_view.no_color = args.no_color
+                        model_view.native = args.native
+                        redraw_model = True
                     else:
                         redraw_metrics = True
                 elif key == curses.KEY_RIGHT:
@@ -1290,6 +1304,11 @@ def begin(stdscr, sampler):
                         gpu_view.no_color = args.no_color
                         gpu_view.native = args.native
                         redraw_gpu = True
+                    elif view == 6 and model_view is not None:
+                        model_view.color = args.color
+                        model_view.no_color = args.no_color
+                        model_view.native = args.native
+                        redraw_model = True
                     else:
                         redraw_metrics = True
                 elif key == curses.KEY_UP and view == 3:
@@ -1310,6 +1329,12 @@ def begin(stdscr, sampler):
                 elif key == curses.KEY_DOWN and view == 5:
                     gpu_view.scroll(1)
                     redraw_gpu = True
+                elif key == curses.KEY_UP and view == 6:
+                    model_view.select(-1)
+                    redraw_model = True
+                elif key == curses.KEY_DOWN and view == 6:
+                    model_view.select(1)
+                    redraw_model = True
                 elif chr(key).lower() == 'q':
                     print("\nStopping...")
                     running = False
@@ -1398,6 +1423,23 @@ def begin(stdscr, sampler):
                     clear_console()
                     redraw_gpu = True
                     refresh_metrics = False
+                elif chr(key) == '6':
+                    if model_view is None:
+                        model_view = ModelView(
+                            args.color,
+                            registry=ServiceRegistry(manual=args.model_url),
+                            no_color=args.no_color,
+                            native=getattr(args, "native", False),
+                        )
+                    else:
+                        model_view.color = args.color
+                        model_view.no_color = args.no_color
+                        model_view.native = getattr(args, "native", False)
+                    model_view.prime()
+                    view = 6
+                    clear_console()
+                    redraw_model = True
+                    refresh_metrics = False
                 elif key == 32 and view == 3:
                     process_view.toggle_pause()
                     redraw_process = True
@@ -1416,6 +1458,15 @@ def begin(stdscr, sampler):
                 elif chr(key).lower() == 's' and view == 5:
                     gpu_view.cycle_sort()
                     redraw_gpu = True
+                elif key == 32 and view == 6:
+                    model_view.toggle_pause()
+                    redraw_model = True
+                elif chr(key).lower() == 's' and view == 6:
+                    model_view.cycle_sort()
+                    redraw_model = True
+                elif chr(key).lower() == 'r' and view == 6:
+                    model_view.refresh()
+                    redraw_model = True
                 elif key == 9 and view == 4:
                     network_view.cycle_focus()
                     redraw_network = True
@@ -1432,6 +1483,9 @@ def begin(stdscr, sampler):
                         redraw_network = True
                     elif view == 5:
                         redraw_gpu = True
+                    elif view == 6:
+                        model_view.refresh()
+                        redraw_model = True
                     else:
                         refresh_metrics = True
 
@@ -1443,7 +1497,7 @@ def begin(stdscr, sampler):
                     time.sleep(0.05)
                     continue
                 resize_until = 0.0
-                redraw_process = redraw_network = redraw_gpu = True
+                redraw_process = redraw_network = redraw_gpu = redraw_model = True
                 refresh_metrics = True
 
             if refresh_metrics and view not in (3, 4, 5) and not tick:
@@ -1452,7 +1506,10 @@ def begin(stdscr, sampler):
                 process_summary = get_process_summary(powermetrics_parse, capabilities)
                 next_tick = time.monotonic() + interval
 
-            if view == 5:
+            if view == 6:
+                if redraw_model:
+                    model_view.display(powermetrics_parse, args)
+            elif view == 5:
                 if redraw_gpu:
                     gpu_view.display(powermetrics_parse, args, sensors)
             elif view == 4:

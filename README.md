@@ -127,6 +127,7 @@ macpm [--interval INTERVAL] [--color COLOR] [--avg AVG] [--show_cores [BOOL]] [-
 | `--avg SECONDS` | Averaging window for power values (default `30`) |
 | `--show_cores [BOOL]` | Start in the per-core view |
 | `--no-public-ip` | Do not look up the public IP and location |
+| `--model-url URL` | Extra model-service endpoint for the model view (repeatable) |
 | `--version` | Print the version |
 
 The default view also has a footer with the key hints.  Keys:
@@ -134,10 +135,10 @@ The default view also has a footer with the key hints.  Keys:
 ```text
 q / ESC         quit
 ← / →           change colour
-1 / 2 / 3 / 4 / 5  default / per-core / process / network / GPU view
+1 / 2 / 3 / 4 / 5 / 6  default / per-core / process / network / GPU / model view
 s               cycle the sort column (process / network / GPU view)
 ↑ / ↓           scroll the list or the focused network pane
-Space           pause / resume the list (process / network / GPU view)
+Space           pause / resume the list (process / network / GPU / model view)
 Tab             switch the focused network pane
 Ctrl+R          reset peaks
 ```

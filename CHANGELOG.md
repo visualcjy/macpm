@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Model view (key `6`): lists the local model servers found in the process
+  table — vLLM, SGLang, llama.cpp, ollama, oMLX and Splash — with the model
+  name, endpoint and the processes behind each service. Discovery is
+  HTTP-free: a row appears when a launcher process is alive and its port
+  accepts a local TCP connection, and every row stays `unverified` until the
+  metrics feed lands. `↑/↓` selects, `s` sorts by port/backend/model, `Space`
+  pauses and `r` rescans; `--model-url host:port` adds an endpoint by hand.
+
 ## 3.3.1 — 2026-11-25
 
 ### Fixed
