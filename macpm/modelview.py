@@ -566,7 +566,11 @@ class ModelView:
             lines.append(field("tokens", "{:,} generated".format(stats.tokens_total)))
         if stats.expires_s is not None:
             lines.append(field("unload", "in {}".format(_duration(stats.expires_s))))
-        for index, row in enumerate(self.feed.recent()[:3]):
+        recent = self.feed.recent()[:3]
+        if not recent:
+            lines.append(field("recent", "-- waiting for the next completed request",
+                               HINT))
+        for index, row in enumerate(recent):
             text = "{}  {}  out {}  {}  {}".format(
                 time.strftime("%H:%M:%S", time.localtime(row.finished)),
                 row.status,
