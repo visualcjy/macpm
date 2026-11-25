@@ -8,14 +8,15 @@
 #
 # Output:
 #   dist/macpm
-#   dist/macpm-3.0-macos-arm64.tar.gz
+#   dist/macpm-<version>-macos-arm64.tar.gz
+#     (<version> comes from macpm.__version__, so it cannot drift)
 set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 DIST="$ROOT/dist"
-VERSION="3.0"
-NAME="macpm-${VERSION}-macos-arm64"
 PYTHON=${PYTHON:-python3}
+VERSION=$(PYTHONPATH="$ROOT" "$PYTHON" -c 'import macpm; print(macpm.__version__)')
+NAME="macpm-${VERSION}-macos-arm64"
 
 if [ "$(uname -m)" != "arm64" ]; then
     echo "This build script targets Apple Silicon (arm64)." >&2
