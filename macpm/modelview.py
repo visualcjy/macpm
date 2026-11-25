@@ -7,6 +7,7 @@ A row that has not been looked at stays ``unverified``.
 
 from __future__ import annotations
 
+import re
 import time
 from typing import Optional
 
@@ -37,6 +38,7 @@ _FOOTER = footer("q quit  1-6 view  \u2191/\u2193 select  s sort  Space pause  r
 _FOOTER_PAUSED = footer("q quit  1-6 view  \u2191/\u2193 select  s sort  Space resume  r refresh")
 
 _SORTS = ("port", "backend", "model")
+_VALUE_TOKEN = re.compile(r"\d+(?:\.\d+)?[A-Za-z%]*")
 _STATE_WIDTH = 14
 
 
@@ -46,6 +48,18 @@ def _service_sort_key(sort: str):
     if sort == "backend":
         return lambda service: (service.backend, service.port)
     return lambda service: (service.port, service.backend)
+
+
+def _value_spans(text: str, base: str = LABEL) -> list:
+    spans, position = [], 0
+    for match in _VALUE_TOKEN.finditer(text):
+        if match.start() > position:
+            spans.append((text[position:match.start()], base))
+        spans.append((match.group(0), VALUE))
+        position = match.end()
+    if position < len(text):
+        spans.append((text[position:], base))
+    return spans or [(text, base)]
 
 
 def _pids_text(service: Service) -> str:
@@ -74,6 +88,14 @@ def _tokens(value: Optional[int]) -> str:
 
 def _gib(value: Optional[float]) -> str:
     return "-" if value is None else "{:.1f} GiB".format(value / (1024 ** 3))
+
+
+def _ttft(ms: Optional[float]) -> str:
+    if ms is None:
+        return "-"
+    if ms < 1000:
+        return "{:.0f}ms".format(ms)
+    return "{:.2f}s".format(ms / 1000.0)
 
 
 def _seconds(ms: Optional[float]) -> str:
@@ -271,7 +293,7 @@ class ModelView:
             detail_height = min(height - 2, len(lines) + 2)
             grid = self._grid(parse, args, sensors, stats, width, height - 2 - detail_height)
             out += self._box(term, 0, width, detail_height,
-                             " MODEL · {} ".format(ordered[0].label), lines, palette)
+                             " MODEL SERVICE · {} ".format(ordered[0].label), lines, palette)
             top = detail_height
             for index, spans in enumerate(grid):
                 painted = paint_spans(spans, palette, width)
@@ -443,11 +465,11 @@ class ModelView:
     def _detail_lines(self, service: Service, inner: int,
                       stats: Optional[ModelStats]) -> list:
         def field(name: str, value: str, role: str = VALUE) -> list:
-            return [(_pad(name, 10), KEY)] + metric_spans(_fit(value, inner - 10), LABEL)
+            return [(_pad(name, 10), KEY)] + _value_spans(_fit(value, inner - 10))
 
         model = (stats.model if stats and stats.model else service.model) or "-"
         lines = [
-            field("model", model),
+            field("model", model, LABEL),
             field("endpoint", service.endpoint, ADDRESS),
             field("state", self._state_detail(stats), MUTED),
         ]
@@ -503,7 +525,7 @@ class ModelView:
             lines.append(field("slots", text))
         if stats.ttft_p50_ms is not None:
             ttft = "{} p50 · {} p95".format(
-                _seconds(stats.ttft_p50_ms), _seconds(stats.ttft_p95_ms)
+                _ttft(stats.ttft_p50_ms), _ttft(stats.ttft_p95_ms)
             )
             lines.append(field("ttft", ttft))
         if stats.ctx_total:
@@ -587,13 +609,15 @@ class ModelView:
              "gauge", 100.0 * (gpu.get("mem_used_mb") or 0) / (gpu.get("mem_total_mb") or 1)),
             ("temp", "GPU temp", "-" if temp is None else "{:.0f} C".format(temp), "", "gauge", temp),
             ("power", "Power", "{:.1f} W".format(total_w),
-             "cpu {:.1f} · gpu {:.1f}".format(cpu_w, gpu_w), "gauge", total_w),
+             ("cpu {:.1f} · gpu {:.1f}".format(cpu_w, gpu_w)
+              if processor.get("cpu_energy_available", True)
+              else "gpu {:.1f} W · cpu n/a".format(gpu_w)), "gauge", total_w),
             ("ctx", "Context", ("{} / {}".format(_tokens(stats.ctx_used), _tokens(stats.ctx_total))
                                 if stats and stats.ctx_total else "--"),
              "context fill", "gauge", ctx_pct),
             ("cpu", "CPU", "-" if cpu_pct is None else "{:.0f} %".format(cpu_pct),
              "E/P clusters", "gauge", cpu_pct),
-            ("disk", "Disk", _format_rate(read),
+            ("disk", "Disk", "read {}".format(_format_rate(read)),
              "write {}".format(_format_rate(disk.get("wbytes_per_s"))), "chart", read or 0.0),
         ]
 
@@ -641,11 +665,11 @@ class ModelView:
         top = [("\u250c\u2500 ", None), (title, BOX), (" ", None), (dashes, None), ("\u2510", None)]
         bottom = [("\u2514", None), ("\u2500" * (width - 2), None), ("\u2518", None)]
         if height <= 3:
-            return [top, [("\u2502 ", None)] + metric_spans(_pad(big, inner), LABEL)
+            return [top, [("\u2502 ", None)] + _value_spans(_pad(big, inner))
                     + [(" \u2502", None)], bottom]
         out = [top,
-               [("\u2502 ", None)] + metric_spans(_pad(big, inner), LABEL) + [(" \u2502", None)],
-               [("\u2502 ", None)] + metric_spans(_pad(sub, inner), LABEL) + [(" \u2502", None)]]
+               [("\u2502 ", None)] + _value_spans(_pad(big, inner)) + [(" \u2502", None)],
+               [("\u2502 ", None)] + _value_spans(_pad(sub, inner)) + [(" \u2502", None)]]
         chart_rows = max(0, height - 4)
         history = self._history.get(key, []) if kind == "chart" else []
         for index in range(chart_rows):

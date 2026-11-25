@@ -78,7 +78,7 @@ class RenderTests(unittest.TestCase):
     def test_single_service_gets_one_detail_card(self):
         view, output = self.make([vllm()])
 
-        self.assertIn("MODEL · vllm", output)
+        self.assertIn("MODEL SERVICE · vllm", output)
         self.assertIn("Qwen3-8B-Instruct", output)
         self.assertNotIn("MODEL SERVICES", output)
         self.assertIn("unverified", output)
@@ -161,7 +161,7 @@ class RenderTests(unittest.TestCase):
 
         self.assertIn("60.5 tok/s", output)
         self.assertIn("608.4 tok/s", output)
-        self.assertIn("0.57s p50", output)
+        self.assertIn("575ms p50", output)
         self.assertIn("1.5 GiB", output)
         self.assertIn("24 done", output)
         self.assertIn("thermal nominal", output)
