@@ -254,7 +254,7 @@ class ModelView:
         ordered = self.ordered()
         stats = self.feed.snapshot() if ordered else None
         inner = max(0, width - 4)
-        out: list = []
+        out: list = [term.clear]
 
         if not ordered:
             out += self._box(term, 0, width, 6, " MODEL SERVICES ",
@@ -264,7 +264,8 @@ class ModelView:
             grid = self._grid_lines(parse, args, sensors, stats, width, height)
             top = 0
             if grid:
-                out += grid
+                for index, line in enumerate(grid):
+                    out.append(term.move(index, 0) + _fit(line, width))
                 top = len(grid)
                 remaining = height - 2 - top
                 detail_height = max(4, min(remaining, len(lines) + 2))
