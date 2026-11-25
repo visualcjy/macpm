@@ -3,6 +3,7 @@
 import contextlib
 import io
 import os
+import types
 import unittest
 
 from macpm.modelview import ModelView
@@ -164,6 +165,26 @@ class RenderTests(unittest.TestCase):
         self.assertIn("1.5 GiB", output)
         self.assertIn("24 done", output)
         self.assertIn("thermal nominal", output)
+
+    def test_wide_terminal_shows_the_eight_card_grid(self):
+        parse = {"processor": {"clusters": [{"name": "E-Cluster", "idle_ratio": 0.5}],
+                               "gpu_energy": 20000.0, "combined_power": 20000.0},
+                 "gpu": {"idle_ratio": 0.25, "name": "Apple M3 Max",
+                         "mem_used_mb": 8192, "mem_total_mb": 36864},
+                 "disk": {"rbytes_per_s": 1024 ** 2, "wbytes_per_s": 1024}}
+        view = ModelView(registry=FakeRegistry([vllm()]), feed=FakeFeed(),
+                         no_color=True, gpu_source=lambda: [])
+        view.prime()
+        os.environ["COLUMNS"] = "110"
+        os.environ["LINES"] = "34"
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            view.display(parse, types.SimpleNamespace(interval=1), None)
+        output = buffer.getvalue()
+
+        for title in ("Speed", "GPU load", "VRAM", "GPU temp",
+                      "Power", "Context", "CPU", "Disk"):
+            self.assertIn(title, output)
 
     def test_cards_and_vram_come_from_the_vendor_gpu_table(self):
         def gpu():

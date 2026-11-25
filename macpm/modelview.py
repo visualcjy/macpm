@@ -83,6 +83,26 @@ def _duration(seconds: float) -> str:
     return "{}s".format(seconds)
 
 
+def _format_rate(bps) -> str:
+    if bps is None:
+        return "-"
+    bps = float(bps)
+    if bps >= 1024 ** 3:
+        return "{:.1f} GB/s".format(bps / 1024 ** 3)
+    if bps >= 1024 ** 2:
+        return "{:.1f} MB/s".format(bps / 1024 ** 2)
+    if bps >= 1024:
+        return "{:.1f} kB/s".format(bps / 1024)
+    return "{:.0f} B/s".format(bps)
+
+
+def _bar(percent, width: int = 20) -> str:
+    if percent is None:
+        return " " * width
+    filled = int(round(max(0.0, min(100.0, float(percent))) / 100.0 * width))
+    return "\u2589" * filled + "\u2591" * (width - filled)
+
+
 def _cards_text(cards: list) -> str:
     if not cards:
         return "-"
@@ -128,6 +148,7 @@ class ModelView:
         self.gpu_source = gpu_source
         self._gpu: dict = {}
         self._gpu_at = -1e9
+        self._speed_history: list = []
 
     # -- lifecycle / keys --------------------------------------------------
 
@@ -213,7 +234,7 @@ class ModelView:
 
     # -- rendering ---------------------------------------------------------
 
-    def display(self, parse=None, args=None) -> None:
+    def display(self, parse=None, args=None, sensors=None) -> None:
         term = self._term
         if term is None:
             term = self._term = Terminal()
@@ -237,7 +258,16 @@ class ModelView:
                              self._empty_lines(inner), palette)
         elif len(ordered) == 1:
             lines = self._detail_lines(ordered[0], inner, stats)
-            out += self._box(term, 0, width, min(height - 2, len(lines) + 2),
+            grid = self._grid_lines(parse, args, sensors, stats) if width >= 110 and height >= 26 else []
+            top = 0
+            if grid:
+                out += grid
+                top = len(grid)
+                remaining = height - 2 - top
+                detail_height = max(4, min(remaining, len(lines) + 2))
+            else:
+                detail_height = min(height - 2, len(lines) + 2)
+            out += self._box(term, top, width, detail_height,
                              " MODEL · {} ".format(ordered[0].label), lines, palette)
         else:
             list_height = self._list_height(height, len(ordered))
@@ -499,6 +529,78 @@ class ModelView:
             )
             lines.append(field("recent" if index == 0 else "", text, MUTED))
         return lines
+
+    # -- wide eight-card grid (form C) -------------------------------------
+
+    def _grid_lines(self, parse, args, sensors, stats: Optional[ModelStats]) -> list:
+        interval = max(0.05, float(getattr(args, "interval", 1) or 1))
+        args = args if args is not None else type("A", (), {"interval": 1.0})()
+        processor = (parse or {}).get("processor") or {}
+        gpu = (parse or {}).get("gpu") or {}
+        disk = (parse or {}).get("disk") or {}
+        clusters = processor.get("clusters") or []
+
+        def pct(idle):
+            return None if idle is None else max(0.0, min(100.0, (1.0 - idle) * 100.0))
+
+        gpu_pct = pct(gpu.get("idle_ratio"))
+        cpu_pct = None
+        if clusters:
+            cpu_pct = sum(pct(c.get("idle_ratio")) or 0.0 for c in clusters) / len(clusters)
+        cpu_w = (processor.get("cpu_energy") or 0.0) / 1000.0 / interval
+        gpu_w = (processor.get("gpu_energy") or 0.0) / 1000.0 / interval
+        total_w = (processor.get("combined_power") or 0.0) / 1000.0 / interval
+        temp = getattr(sensors, "gpu_c", None) if sensors is not None else None
+        speed = stats.decode_tps if stats is not None else None
+        if speed:
+            self._speed_history = (self._speed_history + [speed])[-24:]
+
+        def size(mb):
+            return "-" if not mb else "{:.1f} GB".format(mb / 1024.0)
+
+        def rate(bps):
+            return "-" if bps is None else _format_rate(bps)
+
+        cards = [
+            ("Speed", "{}".format("{:,.1f} tok/s".format(speed) if speed else "--"),
+             "now" if speed else "no decoding", self._spark(self._speed_history)),
+            ("GPU load", "-" if gpu_pct is None else "{:.0f} %".format(gpu_pct),
+             (gpu.get("name") or "-")[:20], _bar(gpu_pct)),
+            ("VRAM", "{} / {}".format(size(gpu.get("mem_used_mb")), size(gpu.get("mem_total_mb"))),
+             ("model " + size((stats.mem_used or 0) / 1024 ** 2)) if stats and stats.mem_used else "-",
+             _bar(100.0 * (gpu.get("mem_used_mb") or 0) / (gpu.get("mem_total_mb") or 1))),
+            ("GPU temp", "-" if temp is None else "{:.0f} C".format(temp), "", _bar(None)),
+            ("Power", "{:.1f} W".format(total_w), "cpu {:.1f} · gpu {:.1f}".format(cpu_w, gpu_w),
+             _bar(min(100.0, total_w / 1.0))),
+            ("Context", ("{} / {}".format(_tokens(stats.ctx_used), _tokens(stats.ctx_total))
+                         if stats and stats.ctx_total else "--"),
+             "context fill", _bar(_percent(stats.ctx_used, stats.ctx_total) if stats else None)),
+            ("CPU", "-" if cpu_pct is None else "{:.0f} %".format(cpu_pct),
+             "E/P clusters", _bar(cpu_pct)),
+            ("Disk", rate(disk.get("rbytes_per_s")),
+             "write {}".format(rate(disk.get("wbytes_per_s"))), _bar(None)),
+        ]
+        rows = []
+        for start in range(0, 8, 4):
+            group = [self._card(*card) for card in cards[start:start + 4]]
+            for line_index in range(5):
+                rows.append("  ".join(card[line_index] for card in group))
+        return rows
+
+    def _card(self, title: str, big: str, sub: str, bar: str) -> list:
+        width = 25
+        inner = width - 4
+        top = "┌─ " + title + " " + "─" * max(0, width - 5 - len(title)) + "┐"
+        body = [_pad(big, inner), _pad(sub, inner), _pad(bar, inner)]
+        return ([top] + ["\u2502 " + line + " \u2502" for line in body]
+                + ["\u2514" + "\u2500" * (width - 2) + "\u2518"])
+
+    def _spark(self, values: list) -> str:
+        if not values:
+            return ""
+        levels = "▁▂▃▄▅▆▇█"
+        peak = max(values) or 1.0
+        return "".join(levels[min(7, int(value / peak * 7))] for value in values)
 
     # -- painting ----------------------------------------------------------
 

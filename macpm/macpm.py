@@ -1508,7 +1508,7 @@ def begin(stdscr, sampler):
 
             if view == 6:
                 if redraw_model:
-                    model_view.display(powermetrics_parse, args)
+                    model_view.display(powermetrics_parse, args, sensors)
             elif view == 5:
                 if redraw_gpu:
                     gpu_view.display(powermetrics_parse, args, sensors)
