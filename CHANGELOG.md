@@ -18,6 +18,12 @@
   selected row is polled — once a second, 1.5 s deadline, 1 MiB cap — and a
   `401`/`403` becomes `auth` instead of a blank row. Keys come from
   `SPLASH_API_KEY` / `OMLX_API_KEY`.
+- Model view metrics for **llama.cpp** (`/props` + `/metrics`: decode/prefill
+  rates, processing/deferred requests, slots, context high-water mark, generated
+  tokens; a server started without `--metrics` still shows its model and slots)
+  and **ollama** (`/api/ps`: loaded model, VRAM, unload countdown — rates stay
+  `--` because the endpoint has none). llama.cpp keys come from
+  `LLAMACPP_API_KEY`.
 
 ## 3.3.1 — 2026-11-25
 

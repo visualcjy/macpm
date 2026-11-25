@@ -74,6 +74,15 @@ def _seconds(ms: Optional[float]) -> str:
     return "-" if ms is None else "{:.2f}s".format(ms / 1000.0)
 
 
+def _duration(seconds: float) -> str:
+    seconds = max(0, int(round(seconds)))
+    if seconds >= 3600:
+        return "{}h {:02d}m".format(seconds // 3600, (seconds % 3600) // 60)
+    if seconds >= 60:
+        return "{}m {:02d}s".format(seconds // 60, seconds % 60)
+    return "{}s".format(seconds)
+
+
 def _percent(used: Optional[float], total: Optional[float]) -> Optional[int]:
     if not used or not total:
         return None
@@ -373,6 +382,12 @@ class ModelView:
         lines = []
         rates = "decode {}   prefill {}".format(_rate(stats.decode_tps), _rate(stats.prefill_tps))
         lines.append(field("rates", rates))
+        if stats.slots_total:
+            used = stats.slots_used if stats.slots_used is not None else stats.active
+            text = "{} / {}".format("-" if used is None else used, stats.slots_total)
+            if stats.waiting:
+                text += "   queued {}".format(stats.waiting)
+            lines.append(field("slots", text))
         if stats.ttft_p50_ms is not None:
             ttft = "{} p50 · {} p95".format(
                 _seconds(stats.ttft_p50_ms), _seconds(stats.ttft_p95_ms)
@@ -403,6 +418,10 @@ class ModelView:
             if stats.thermal:
                 text += " · thermal {}".format(stats.thermal)
             lines.append(field("requests", text))
+        if stats.tokens_total is not None:
+            lines.append(field("tokens", "{:,} generated".format(stats.tokens_total)))
+        if stats.expires_s is not None:
+            lines.append(field("unload", "in {}".format(_duration(stats.expires_s))))
         return lines
 
     # -- painting ----------------------------------------------------------

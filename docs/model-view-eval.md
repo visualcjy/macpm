@@ -5,12 +5,13 @@
 
 评估范围：**只读**监控本机 / 本机容器内的模型服务；不启动、不停止、不加载模型；不覆盖远端主机。
 
-> **实现状态（2026-11-25）：P0 + P1 已落地，P2 完成了 Splash 与 oMLX。**
+> **实现状态（2026-11-25）：P0 + P1 已落地，P2 完成 Splash / oMLX / llama.cpp / ollama。**
 > `macpm/serviceregistry.py` 实现零 HTTP 的服务发现（进程指纹 + 本地 TCP 校验 + 手动端点，
 > 已适配 Splash.app / oMLX.app 的 bundle 启动方式）；`macpm/modelview.py` 提供列表/详情与
 > 单服务卡片；`macpm/modelfeed.py` 在**选中时**每秒轮询一次（1.5 s 超时、1 MiB 上限），
-> 目前接了 Splash `/status` 与 oMLX `/admin/api/activity`，vLLM / SGLang / llama.cpp /
-> ollama 的适配器（§5.4 与 A 档字段）尚未实现。未轮询的行仍显示 `unverified`。
+> 已接 Splash `/status`、oMLX `/admin/api/activity`、llama.cpp（`/props` + `/metrics`，
+> 未开 `--metrics` 时降级为模型 + slots）、ollama（`/api/ps`，C 档无速率）。
+> vLLM / SGLang 的 Prometheus 适配器尚未实现，未轮询的行仍显示 `unverified`。
 
 ---
 

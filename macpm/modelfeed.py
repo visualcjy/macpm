@@ -14,6 +14,7 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Callable, Optional
 
 from .serviceregistry import Service
@@ -26,6 +27,7 @@ STALE_AFTER = 3.0
 _KEYS = {
     "splash": "SPLASH_API_KEY",
     "omlx": "OMLX_API_KEY",
+    "llama.cpp": "LLAMACPP_API_KEY",
 }
 
 
@@ -42,6 +44,10 @@ class ModelStats:
     phases: dict = field(default_factory=dict)
     ttft_p50_ms: Optional[float] = None
     ttft_p95_ms: Optional[float] = None
+    slots_used: Optional[int] = None
+    slots_total: Optional[int] = None
+    tokens_total: Optional[int] = None
+    expires_s: Optional[float] = None
     ctx_used: Optional[int] = None
     ctx_total: Optional[int] = None
     kv_used: Optional[float] = None     # bytes
@@ -66,6 +72,52 @@ def _http_json(host: str, port: int, path: str, key: str = "") -> dict:
             raise ValueError(f"HTTP {getattr(response, 'status', 0)}")
         payload = response.read(MAX_BYTES)
     return json.loads(payload.decode("utf-8", "replace"))
+
+
+def _http_text(host: str, port: int, path: str, key: str = "") -> str:
+    url = f"http://{host}:{port}{path}"
+    headers = {"Accept": "text/plain", "User-Agent": "macpm"}
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+    request = urllib.request.Request(url, headers=headers)
+    with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
+        if getattr(response, "status", 200) != 200:
+            raise ValueError(f"HTTP {getattr(response, 'status', 0)}")
+        return response.read(MAX_BYTES).decode("utf-8", "replace")
+
+
+def parse_prometheus(text: str) -> dict:
+    """Metric name → last value; labels and timestamps are ignored."""
+    values = {}
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        name, _, rest = line.partition(" ")
+        if not name:
+            continue
+        base = name.split("{", 1)[0]
+        token = rest.split(" ")[0] if rest else ""
+        try:
+            values[base] = float(token)
+        except ValueError:
+            continue
+    return values
+
+
+def _basename(path: str) -> str:
+    base = (path or "").rstrip("/").rsplit("/", 1)[-1]
+    return base[: -len(".gguf")] if base.endswith(".gguf") else (base or "-")
+
+
+def _seconds_until(iso: str) -> Optional[float]:
+    try:
+        moment = datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return max(0.0, (moment - datetime.now(timezone.utc)).total_seconds())
 
 
 def _key_for(backend: str) -> str:
@@ -171,8 +223,44 @@ def parse_omlx(payload: dict, at: float = 0.0) -> ModelStats:
     return stats
 
 
-_PARSERS = {"splash": parse_splash, "omlx": parse_omlx}
-_PATHS = {"splash": "/status", "omlx": "/admin/api/activity"}
+def parse_llamacpp(props: dict, metrics: dict) -> ModelStats:
+    """llama.cpp ``/props`` plus the parsed ``/metrics`` counters."""
+    stats = ModelStats(state="live")
+    generation = props.get("default_generation_settings") or {}
+    slots = _int(props.get("total_slots"))
+    stats.slots_total = slots
+    stats.ctx_total = _int(generation.get("n_ctx"))
+    stats.model = _basename(props.get("model_path") or "")
+
+    stats.decode_tps = _number(metrics.get("llamacpp:predicted_tokens_seconds"))
+    stats.prefill_tps = _number(metrics.get("llamacpp:prompt_tokens_seconds"))
+    stats.active = _int(metrics.get("llamacpp:requests_processing"))
+    stats.waiting = _int(metrics.get("llamacpp:requests_deferred"))
+    stats.slots_used = stats.active
+    stats.tokens_total = _int(metrics.get("llamacpp:tokens_predicted_total"))
+    stats.ctx_used = _int(metrics.get("llamacpp:n_tokens_max"))
+    return stats
+
+
+def parse_ollama(payload: dict, at: float = 0.0) -> ModelStats:
+    """ollama ``/api/ps``: load state only, no rates (a C-tier backend)."""
+    models = payload.get("models") or []
+    stats = ModelStats(state="live", at=at)
+    if not models:
+        stats.state = "live"
+        stats.model = "-"
+        stats.note = "no model loaded"
+        return stats
+    first = models[0]
+    stats.model = str(first.get("name") or first.get("model") or "-")
+    size = _number(first.get("size"))
+    vram = _number(first.get("size_vram"))
+    stats.mem_used = vram if vram else size
+    stats.mem_peak = size
+    stats.expires_s = _seconds_until(first.get("expires_at") or "")
+    if len(models) > 1:
+        stats.note = "{} models loaded · showing {}".format(len(models), stats.model)
+    return stats
 
 
 def _number(value) -> Optional[float]:
@@ -259,14 +347,48 @@ class ModelFeed:
                 self._stats = stats
 
 
+def _fetch_splash(service: Service, key: str) -> ModelStats:
+    return parse_splash(_http_json(service.host, service.port, "/status", key))
+
+
+def _fetch_omlx(service: Service, key: str) -> ModelStats:
+    return parse_omlx(
+        _http_json(service.host, service.port, "/admin/api/activity", key)
+    )
+
+
+def _fetch_llamacpp(service: Service, key: str) -> ModelStats:
+    props = _http_json(service.host, service.port, "/props", key)
+    try:
+        metrics = parse_prometheus(
+            _http_text(service.host, service.port, "/metrics", key)
+        )
+        stats = parse_llamacpp(props, metrics)
+    except (urllib.error.HTTPError, ValueError):
+        # ``--metrics`` is off by default: the model and slot count still work.
+        stats = parse_llamacpp(props, {})
+        stats.note = "metrics disabled · start llama-server with --metrics"
+    return stats
+
+
+def _fetch_ollama(service: Service, key: str) -> ModelStats:
+    return parse_ollama(_http_json(service.host, service.port, "/api/ps", key))
+
+
+_FETCHERS = {
+    "splash": _fetch_splash,
+    "omlx": _fetch_omlx,
+    "llama.cpp": _fetch_llamacpp,
+    "ollama": _fetch_ollama,
+}
+
+
 def fetch_stats(service: Service, key: str = "") -> ModelStats:
     """Fetch and parse one service; raises for transport errors."""
-    path = _PATHS.get(service.backend)
-    parser = _PARSERS.get(service.backend)
-    if path is None or parser is None:
+    fetcher = _FETCHERS.get(service.backend)
+    if fetcher is None:
         return ModelStats(state="no-telemetry", note="adapter not implemented")
-    payload = _http_json(service.host, service.port, path, key)
-    stats = parser(payload)
+    stats = fetcher(service, key)
     if not stats.model:
         stats.model = service.model
     return stats

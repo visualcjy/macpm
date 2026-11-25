@@ -1,9 +1,21 @@
 """Adapter tests for the model metrics feed, using recorded payload shapes."""
 
+import http.server
+import json
+import threading
 import unittest
 import urllib.error
 
-from macpm.modelfeed import ModelFeed, ModelStats, parse_omlx, parse_splash
+from macpm.modelfeed import (
+    ModelFeed,
+    ModelStats,
+    fetch_stats,
+    parse_llamacpp,
+    parse_ollama,
+    parse_omlx,
+    parse_prometheus,
+    parse_splash,
+)
 from macpm.serviceregistry import Service
 
 SPLASH_STATUS = {
@@ -129,6 +141,156 @@ class FeedTests(unittest.TestCase):
         feed.select(Service("omlx", "native", "127.0.0.1", 8010, "y", (2,)))
 
         self.assertIsNone(feed.snapshot())
+
+
+
+
+
+LLAMA_PROPS = {
+    "total_slots": 4,
+    "model_path": "/models/llama-3.1-8B-Q4_K_M.gguf",
+    "default_generation_settings": {"n_ctx": 32768},
+}
+
+LLAMA_METRICS = """
+# HELP llamacpp:requests_processing Requests processing
+llamacpp:requests_processing 3
+llamacpp:requests_deferred 1
+llamacpp:predicted_tokens_seconds 42.75
+llamacpp:prompt_tokens_seconds 318.0
+llamacpp:tokens_predicted_total 128400.0 1700000000
+llamacpp:n_tokens_max 5120
+"""
+
+OLLAMA_PS = {
+    "models": [
+        {
+            "name": "qwen3:8b",
+            "model": "qwen3:8b",
+            "size": 5_127_025_024,
+            "size_vram": 5_127_025_024,
+            "expires_at": "2099-01-01T00:00:00-08:00",
+        }
+    ]
+}
+
+
+class PrometheusTests(unittest.TestCase):
+    def test_labels_comments_and_timestamps_are_tolerated(self):
+        values = parse_prometheus(LLAMA_METRICS)
+
+        self.assertEqual(values["llamacpp:requests_processing"], 3.0)
+        self.assertEqual(values["llamacpp:tokens_predicted_total"], 128400.0)
+        self.assertNotIn("# HELP llamacpp:requests_processing Requests processing",
+                         values)
+
+
+class LlamaCppParserTests(unittest.TestCase):
+    def test_props_plus_metrics(self):
+        stats = parse_llamacpp(LLAMA_PROPS, parse_prometheus(LLAMA_METRICS))
+
+        self.assertEqual(stats.state, "live")
+        self.assertEqual(stats.model, "llama-3.1-8B-Q4_K_M")
+        self.assertEqual(stats.decode_tps, 42.75)
+        self.assertEqual(stats.prefill_tps, 318.0)
+        self.assertEqual((stats.active, stats.waiting), (3, 1))
+        self.assertEqual((stats.slots_used, stats.slots_total), (3, 4))
+        self.assertEqual(stats.ctx_total, 32768)
+        self.assertEqual(stats.ctx_used, 5120)
+        self.assertEqual(stats.tokens_total, 128400)
+
+    def test_metrics_disabled_leaves_the_card_useful(self):
+        stats = parse_llamacpp(LLAMA_PROPS, {})
+
+        self.assertEqual(stats.model, "llama-3.1-8B-Q4_K_M")
+        self.assertEqual(stats.slots_total, 4)
+        self.assertIsNone(stats.decode_tps)
+
+
+class OllamaParserTests(unittest.TestCase):
+    def test_loaded_model_and_unload_countdown(self):
+        stats = parse_ollama(OLLAMA_PS)
+
+        self.assertEqual(stats.state, "live")
+        self.assertEqual(stats.model, "qwen3:8b")
+        self.assertAlmostEqual(stats.mem_used, 5_127_025_024)
+        self.assertIsNotNone(stats.expires_s)
+        self.assertGreater(stats.expires_s, 0)
+
+    def test_nothing_loaded(self):
+        stats = parse_ollama({"models": []})
+
+        self.assertEqual(stats.model, "-")
+        self.assertEqual(stats.note, "no model loaded")
+
+
+class MockHandler(http.server.BaseHTTPRequestHandler):
+    routes = {}
+    seen = []
+
+    def do_GET(self):
+        MockHandler.seen.append((self.path, self.headers.get("Authorization")))
+        body, status = MockHandler.routes.get(self.path, ({"error": "no"}, 404))
+        payload = body.encode() if isinstance(body, str) else json.dumps(body).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def log_message(self, *args):
+        pass
+
+
+class MockServerTests(unittest.TestCase):
+    def setUp(self):
+        MockHandler.seen = []
+        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), MockHandler)
+        self.port = self.server.server_address[1]
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.server.server_close()
+
+    def service(self, backend="llama.cpp"):
+        return Service(backend, "llamacpp", "127.0.0.1", self.port, "-", (1,))
+
+    def test_llamacpp_without_metrics_says_so(self):
+        MockHandler.routes = {
+            "/props": (LLAMA_PROPS, 200),
+            "/metrics": ({"error": "not supported"}, 501),
+        }
+        stats = fetch_stats(self.service())
+
+        self.assertEqual(stats.state, "live")
+        self.assertIn("metrics disabled", stats.note)
+        self.assertEqual(stats.slots_total, 4)
+
+    def test_llamacpp_with_metrics_reads_them(self):
+        MockHandler.routes = {
+            "/props": (LLAMA_PROPS, 200),
+            "/metrics": (LLAMA_METRICS, 200),
+        }
+        stats = fetch_stats(self.service())
+
+        self.assertEqual(stats.decode_tps, 42.75)
+        self.assertFalse(stats.note)
+
+    def test_ollama_ps_is_read(self):
+        MockHandler.routes = {"/api/ps": (OLLAMA_PS, 200)}
+        stats = fetch_stats(self.service("ollama"))
+
+        self.assertEqual(stats.model, "qwen3:8b")
+
+    def test_api_key_is_sent_as_a_bearer_token(self):
+        MockHandler.routes = {"/props": (LLAMA_PROPS, 200),
+                              "/metrics": (LLAMA_METRICS, 200)}
+
+        fetch_stats(self.service(), key="secret")
+
+        headers = [auth for path, auth in MockHandler.seen if path == "/props"]
+        self.assertEqual(headers, ["Bearer secret"])
 
 
 if __name__ == "__main__":
