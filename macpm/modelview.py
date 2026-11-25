@@ -541,6 +541,8 @@ class ModelView:
             else:
                 text = "idle · capacity {}".format(_tokens(stats.ctx_total))
             lines.append(field("context", text))
+        if stats.kv_pct is not None:
+            lines.append(field("kv", "{:.0f}%  of the KV pool".format(stats.kv_pct)))
         if stats.kv_used is not None:
             text = "{} / {}".format(_gib(stats.kv_used), _gib(stats.kv_total))
             pct = _percent(stats.kv_used, stats.kv_total)

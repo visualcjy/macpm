@@ -15,6 +15,8 @@ from macpm.modelfeed import (
     parse_ollama,
     parse_omlx,
     parse_prometheus,
+    parse_sglang,
+    parse_vllm,
     parse_splash,
 )
 from macpm.serviceregistry import Service
@@ -284,6 +286,25 @@ class MockServerTests(unittest.TestCase):
 
         self.assertEqual(stats.model, "qwen3:8b")
 
+    def test_vllm_metrics_endpoint_is_supported(self):
+        MockHandler.routes = {"/metrics": (VLLM_METRICS, 200),
+                              "/v1/models": ({"data": [{"id": "Qwen3-72B"}]}, 200)}
+        stats = fetch_stats(self.service("vllm"))
+
+        self.assertEqual(stats.model, "Qwen3-72B")
+        self.assertEqual(stats.active, 5)
+        self.assertEqual(stats.kv_pct, 78.0)
+
+    def test_sglang_metrics_and_server_info(self):
+        MockHandler.routes = {
+            "/metrics": (SGLANG_METRICS, 200),
+            "/get_server_info": ({"model_path": "/m/Qwen3-32B"}, 200),
+        }
+        stats = fetch_stats(self.service("sglang"))
+
+        self.assertEqual(stats.model, "Qwen3-32B")
+        self.assertEqual(stats.decode_tps, 52.5)
+
     def test_api_key_is_sent_as_a_bearer_token(self):
         MockHandler.routes = {"/props": (LLAMA_PROPS, 200),
                               "/metrics": (LLAMA_METRICS, 200)}
@@ -322,6 +343,64 @@ class RecentRequestTests(unittest.TestCase):
         feed.select(Service("splash", "native", "127.0.0.1", 8000, "x", (1,)))
 
         self.assertEqual(feed.recent(), [])
+
+
+
+
+VLLM_METRICS = """
+vllm:num_requests_running 5
+vllm:num_requests_waiting 1
+vllm:kv_cache_usage_perc 0.78
+vllm:generation_tokens_total 2100000
+vllm:prompt_tokens_total 18400000
+vllm:request_success_total 41200
+"""
+
+SGLANG_METRICS = """
+sglang:num_running_reqs 3
+sglang:num_queue_reqs 0
+sglang:gen_throughput 52.5
+sglang:token_usage 0.42
+sglang:generation_tokens_total 1000
+sglang:prompt_tokens_total 5000
+"""
+
+
+class VllmSglangTests(unittest.TestCase):
+    def test_vllm_gauges_and_counters(self):
+        stats = parse_vllm(parse_prometheus(VLLM_METRICS), "Qwen3-72B")
+
+        self.assertEqual(stats.active, 5)
+        self.assertEqual(stats.waiting, 1)
+        self.assertAlmostEqual(stats.kv_pct, 78.0)
+        self.assertEqual(stats.requests, 41200)
+        self.assertIsNone(stats.decode_tps)      # derived from counters later
+
+    def test_sglang_reads_its_gauge(self):
+        stats = parse_sglang(parse_prometheus(SGLANG_METRICS),
+                             {"model_path": "/models/Qwen3-32B"})
+
+        self.assertEqual(stats.model, "Qwen3-32B")
+        self.assertEqual(stats.active, 3)
+        self.assertAlmostEqual(stats.decode_tps, 52.5)
+        self.assertAlmostEqual(stats.kv_pct, 42.0)
+
+
+class RateDerivationTests(unittest.TestCase):
+    def test_counters_become_tok_per_second(self):
+        now = [100.0]
+        feed = ModelFeed(clock=lambda: now[0])
+        service = Service("vllm", "prometheus", "127.0.0.1", 8000, "m", (1,))
+        first = ModelStats(state="live", gen_tokens=1000, prompt_tokens=2000)
+        feed._derive_rates(service, first)
+        self.assertIsNone(first.decode_tps)
+
+        now[0] += 2.0
+        second = ModelStats(state="live", gen_tokens=1080, prompt_tokens=3000)
+        feed._derive_rates(service, second)
+
+        self.assertAlmostEqual(second.decode_tps, 40.0)
+        self.assertAlmostEqual(second.prefill_tps, 500.0)
 
 
 if __name__ == "__main__":

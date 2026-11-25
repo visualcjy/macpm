@@ -24,6 +24,10 @@
   and **ollama** (`/api/ps`: loaded model, VRAM, unload countdown — rates stay
   `--` because the endpoint has none). llama.cpp keys come from
   `LLAMACPP_API_KEY`.
+- Model view metrics for **vLLM** and **SGLang**: `/metrics` gauges for
+  running/waiting requests and KV usage, plus TTFT averages; since neither
+  exposes a tok/s gauge, decode and prefill rates are derived by diffing the
+  token counters between polls (the first poll shows `--` and says why).
 - Model view `recent requests`: the feed reconstructs completions from
   consecutive polls (a request id that disappears becomes a row with its
   output tokens, rate and duration) and lists the newest three under the

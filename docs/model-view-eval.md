@@ -15,7 +15,7 @@
 > 列表的 `CARDS` / `VRAM` 取自 Linux 厂商 GPU 表（无表时隐藏）；
 > 形态 C（≥110×26 的八卡网格）已实现，Power/PCIe 卡片按本机可得数据取舍
 > （PCIe 在 macOS 不存在，替换为 Context 卡）。
-> vLLM / SGLang 的 Prometheus 适配器尚未实现，未轮询的行仍显示 `unverified`。
+> vLLM / SGLang 也已接入（`/metrics` + `/v1/models` / `/get_server_info`，tok/s 由计数器差分）。
 
 ---
 

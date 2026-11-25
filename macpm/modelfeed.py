@@ -52,6 +52,9 @@ class ModelStats:
     ctx_total: Optional[int] = None
     kv_used: Optional[float] = None     # bytes
     kv_total: Optional[float] = None    # bytes
+    kv_pct: Optional[float] = None      # 0-100 when the server reports a ratio
+    gen_tokens: Optional[int] = None    # counters kept for client-side rates
+    prompt_tokens: Optional[int] = None
     mem_used: Optional[float] = None    # bytes
     mem_peak: Optional[float] = None
     requests: Optional[int] = None
@@ -275,6 +278,49 @@ def parse_llamacpp(props: dict, metrics: dict) -> ModelStats:
     return stats
 
 
+def parse_vllm(metrics: dict, model: str = "") -> ModelStats:
+    """vLLM ``/metrics``: gauges for concurrency/KV, counters for tokens."""
+    stats = ModelStats(state="live", model=model)
+    stats.active = _int(metrics.get("vllm:num_requests_running"))
+    stats.waiting = _int(metrics.get("vllm:num_requests_waiting"))
+    kv = _number(metrics.get("vllm:kv_cache_usage_perc"))
+    if kv is not None:
+        stats.kv_pct = kv * 100.0 if kv <= 1.0 else kv
+    stats.gen_tokens = _int(metrics.get("vllm:generation_tokens_total")
+                            if "vllm:generation_tokens_total" in metrics
+                            else metrics.get("vllm:generation_tokens"))
+    stats.prompt_tokens = _int(metrics.get("vllm:prompt_tokens_total")
+                               if "vllm:prompt_tokens_total" in metrics
+                               else metrics.get("vllm:prompt_tokens"))
+    stats.requests = _int(metrics.get("vllm:request_success_total"))
+    total = metrics.get("vllm:time_to_first_token_seconds_sum")
+    count = metrics.get("vllm:time_to_first_token_seconds_count")
+    if total is not None and count:
+        avg = total / count * 1000.0
+        stats.ttft_p50_ms = avg
+    return stats
+
+
+def parse_sglang(metrics: dict, info: dict = None) -> ModelStats:
+    """SGLang ``/metrics`` plus ``/get_server_info``."""
+    stats = ModelStats(state="live")
+    info = info or {}
+    stats.model = _basename(info.get("model_path") or "")
+    stats.active = _int(metrics.get("sglang:num_running_reqs"))
+    stats.waiting = _int(metrics.get("sglang:num_queue_reqs"))
+    stats.decode_tps = _number(metrics.get("sglang:gen_throughput"))
+    usage = _number(metrics.get("sglang:token_usage"))
+    if usage is not None:
+        stats.kv_pct = usage * 100.0 if usage <= 1.0 else usage
+    stats.gen_tokens = _int(metrics.get("sglang:generation_tokens_total"))
+    stats.prompt_tokens = _int(metrics.get("sglang:prompt_tokens_total"))
+    total = metrics.get("sglang:time_to_first_token_seconds_sum")
+    count = metrics.get("sglang:time_to_first_token_seconds_count")
+    if total is not None and count:
+        stats.ttft_p50_ms = total / count * 1000.0
+    return stats
+
+
 def parse_ollama(payload: dict, at: float = 0.0) -> ModelStats:
     """ollama ``/api/ps``: load state only, no rates (a C-tier backend)."""
     models = payload.get("models") or []
@@ -330,6 +376,7 @@ class ModelFeed:
         self._at = 0.0
         self._recent: list = []
         self._active: dict = {}
+        self._counters: dict = {}
 
     # -- selection ---------------------------------------------------------
 
@@ -344,6 +391,7 @@ class ModelFeed:
             self._next = 0.0
             self._recent = []
             self._active = {}
+            self._counters = {}
 
     def snapshot(self) -> Optional[ModelStats]:
         with self._lock:
@@ -352,6 +400,25 @@ class ModelFeed:
     def recent(self) -> list:
         with self._lock:
             return list(self._recent)
+
+    def _derive_rates(self, service: Service, stats: ModelStats) -> None:
+        """vLLM/SGLang only expose token counters: diff them into tok/s."""
+        if stats.gen_tokens is None and stats.prompt_tokens is None:
+            return
+        now = self.clock()
+        previous = self._counters.get(service.identity)
+        self._counters[service.identity] = (
+            stats.gen_tokens or 0, stats.prompt_tokens or 0, now)
+        if previous is None:
+            stats.decode_tps = stats.decode_tps      # first sample: no rate yet
+            stats.note = stats.note or "rate needs two samples"
+            return
+        gen0, prompt0, at0 = previous
+        elapsed = max(0.2, now - at0)
+        if stats.gen_tokens is not None:
+            stats.decode_tps = max(0.0, stats.gen_tokens - gen0) / elapsed
+        if stats.prompt_tokens is not None:
+            stats.prefill_tps = max(0.0, stats.prompt_tokens - prompt0) / elapsed
 
     def _track(self, stats: ModelStats) -> None:
         """Turn disappeared request ids into completed rows (client-side)."""
@@ -416,6 +483,7 @@ class ModelFeed:
         with self._lock:
             # Drop the result if the user moved on to another service.
             if self._service is not None and self._service.identity == service.identity:
+                self._derive_rates(service, stats)
                 self._stats = stats
                 self._track(stats)
 
@@ -448,7 +516,36 @@ def _fetch_ollama(service: Service, key: str) -> ModelStats:
     return parse_ollama(_http_json(service.host, service.port, "/api/ps", key))
 
 
+def _model_name(host: str, port: int, key: str) -> str:
+    try:
+        payload = _http_json(host, port, "/v1/models", key)
+        data = payload.get("data") or []
+        if data:
+            return str(data[0].get("id") or "")
+    except Exception:
+        pass
+    return ""
+
+
+def _fetch_vllm(service: Service, key: str) -> ModelStats:
+    metrics = parse_prometheus(
+        _http_text(service.host, service.port, "/metrics", key))
+    return parse_vllm(metrics, _model_name(service.host, service.port, key))
+
+
+def _fetch_sglang(service: Service, key: str) -> ModelStats:
+    metrics = parse_prometheus(
+        _http_text(service.host, service.port, "/metrics", key))
+    try:
+        info = _http_json(service.host, service.port, "/get_server_info", key)
+    except Exception:
+        info = {}
+    return parse_sglang(metrics, info)
+
+
 _FETCHERS = {
+    "vllm": _fetch_vllm,
+    "sglang": _fetch_sglang,
     "splash": _fetch_splash,
     "omlx": _fetch_omlx,
     "llama.cpp": _fetch_llamacpp,
