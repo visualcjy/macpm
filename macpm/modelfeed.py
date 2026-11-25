@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Callable, Optional
 
+from .modellog import DEFAULT_SPLASH_LOG, SplashLogReader
 from .serviceregistry import Service
 
 TIMEOUT = 1.5
@@ -80,6 +81,7 @@ class RequestRow:
     duration: float = 0.0
     first_ms: Optional[float] = None
     cached: Optional[int] = None
+    started: Optional[float] = None
 
 
 def _http_json(host: str, port: int, path: str, key: str = "") -> dict:
@@ -385,6 +387,7 @@ class ModelFeed:
         self._active: dict = {}
         self._counters: dict = {}
         self._decode_state: dict = {}
+        self._logs: dict = {}
 
     # -- selection ---------------------------------------------------------
 
@@ -401,6 +404,7 @@ class ModelFeed:
             self._active = {}
             self._counters = {}
             self._decode_state = {}
+            self._logs = {}
 
     def snapshot(self) -> Optional[ModelStats]:
         with self._lock:
@@ -409,6 +413,35 @@ class ModelFeed:
     def recent(self) -> list:
         with self._lock:
             return list(self._recent)
+
+    def _read_log(self, service: Service) -> bool:
+        """Pull real per-request rows from the server's own log."""
+        if service.backend != "splash":
+            return False
+        reader = self._logs.get(service.identity)
+        if reader is None:
+            path = os.environ.get("SPLASH_LOG", DEFAULT_SPLASH_LOG)
+            reader = SplashLogReader(path)
+            self._logs[service.identity] = reader
+        if not reader.tail.exists():
+            return False
+        got = False
+        for entry in reader.poll():
+            self._recent.insert(0, RequestRow(
+                rid="log",
+                finished=entry["finished"],
+                started=entry.get("started"),
+                prompt=entry.get("prompt"),
+                cached=entry.get("cached"),
+                output=entry.get("output"),
+                first_ms=entry.get("first_ms"),
+                tps=entry.get("tps"),
+                duration=entry.get("duration") or 0.0,
+            ))
+            got = True
+        if got:
+            del self._recent[8:]
+        return got
 
     def _observe_decode(self, service: Service, stats: ModelStats) -> None:
         """Tokens/s actually produced between two polls, like the dashboard."""
@@ -516,7 +549,8 @@ class ModelFeed:
                 self._observe_decode(service, stats)
                 self._derive_rates(service, stats)
                 self._stats = stats
-                self._track(stats)
+                if not self._read_log(service):
+                    self._track(stats)
 
 
 def _fetch_splash(service: Service, key: str) -> ModelStats:

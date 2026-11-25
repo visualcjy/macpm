@@ -580,7 +580,7 @@ class ModelView:
             recent_rows.append("recent    -- waiting for the next completed request")
         for index, row in enumerate(recent):
             text = "{}  {}  out {}  {}  {}".format(
-                time.strftime("%H:%M:%S", time.localtime(row.finished)),
+                time.strftime("%H:%M:%S", time.localtime(row.started or row.finished)),
                 row.status,
                 _tokens(row.output),
                 _rate(row.tps) if row.tps else "-",
