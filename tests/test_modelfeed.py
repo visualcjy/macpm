@@ -340,6 +340,7 @@ class RecentRequestTests(unittest.TestCase):
         self.assertEqual(rows[0].output, 90)
         self.assertAlmostEqual(rows[0].duration, 3.0)
         self.assertAlmostEqual(rows[0].tps, 30.0)
+        self.assertGreater(rows[0].finished, 1_600_000_000)   # wall clock, not monotonic
         self.assertIsNone(rows[0].first_ms)
         self.assertIsNone(rows[0].cached)
 

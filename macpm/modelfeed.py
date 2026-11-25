@@ -451,7 +451,9 @@ class ModelFeed:
             tps = (output / duration) if duration > 0 and output else None
             self._recent.insert(0, RequestRow(
                 rid=rid,
-                finished=now,
+                # Wall clock for display; ``now`` is monotonic and only used
+                # for the duration maths above.
+                finished=time.time(),
                 prompt=prompt,
                 output=output,
                 tps=tps,
