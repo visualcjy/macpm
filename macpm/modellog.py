@@ -246,6 +246,11 @@ def docker_containers(runner=None) -> list:
         if len(parts) < 3:
             continue
         name, image, ports = parts[0], parts[1], parts[2]
+        seen = set()
         for port in _PORTS.findall(ports):
-            rows.append((_backend_for(image), int(port), name, image))
+            key = (_backend_for(image), int(port), name)
+            if key in seen:          # the IPv4 and IPv6 mappings of one port
+                continue
+            seen.add(key)
+            rows.append((key[0], key[1], name, image))
     return rows
