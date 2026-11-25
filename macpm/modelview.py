@@ -477,9 +477,13 @@ class ModelView:
             field("endpoint", service.endpoint, ADDRESS),
             field("state", self._state_detail(stats), MUTED),
         ]
+        recent = []
         if stats is not None and stats.state == "live":
-            lines += self._metric_lines(stats, field, service)
+            extra, recent = self._metric_lines(stats, field, service)
+            lines += extra
         lines = self._pair(lines)
+        for row in recent:
+            lines.append([(_fit(row, inner), MUTED)])
         if stats is not None and stats.note:
             lines.append(field("note", stats.note, HINT))
         return lines
@@ -517,7 +521,7 @@ class ModelView:
             return "stale"
         return "error"
 
-    def _metric_lines(self, stats: ModelStats, field, service: Service) -> list:
+    def _metric_lines(self, stats: ModelStats, field, service: Service) -> tuple:
         lines = []
         lines.append(field("decode", _rate(stats.decode_tps)))
         lines.append(field("prefill", _rate(stats.prefill_tps)))
@@ -561,15 +565,19 @@ class ModelView:
                 text += " · {} failed".format(stats.failed)
             if stats.thermal:
                 text += " · thermal {}".format(stats.thermal)
-            lines.append(field("requests", text))
+            pressure = (stats.thermal or "").lower()
+            role = (CRIT if pressure in ("serious", "critical")
+                    else WARN if pressure == "fair" else None)
+            lines.append(field("requests", text, role) if role
+                         else field("requests", text))
         if stats.tokens_total is not None:
             lines.append(field("tokens", "{:,} generated".format(stats.tokens_total)))
         if stats.expires_s is not None:
             lines.append(field("unload", "in {}".format(_duration(stats.expires_s))))
+        recent_rows = []
         recent = self.feed.recent()[:3]
         if not recent:
-            lines.append(field("recent", "-- waiting for the next completed request",
-                               HINT))
+            recent_rows.append("recent    -- waiting for the next completed request")
         for index, row in enumerate(recent):
             text = "{}  {}  out {}  {}  {}".format(
                 time.strftime("%H:%M:%S", time.localtime(row.finished)),
@@ -582,8 +590,9 @@ class ModelView:
                 _ttft(row.first_ms) if row.first_ms is not None else "--")
             text += "  cached {}".format(
                 _tokens(row.cached) if row.cached else "--")
-            lines.append(field("recent" if index == 0 else "", text, MUTED))
-        return lines
+            recent_rows.append(
+                ("recent    " if index == 0 else " " * 10) + text)
+        return lines, recent_rows
 
     # -- wide eight-card grid (form C) -------------------------------------
 
