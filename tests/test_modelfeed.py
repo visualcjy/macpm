@@ -288,21 +288,25 @@ class MockServerTests(unittest.TestCase):
 
     def test_vllm_metrics_endpoint_is_supported(self):
         MockHandler.routes = {"/metrics": (VLLM_METRICS, 200),
-                              "/v1/models": ({"data": [{"id": "Qwen3-72B"}]}, 200)}
+                              "/v1/models": ({"data": [{"id": "Qwen3-72B",
+                                                        "max_model_len": 131072}]}, 200)}
         stats = fetch_stats(self.service("vllm"))
 
         self.assertEqual(stats.model, "Qwen3-72B")
+        self.assertEqual(stats.ctx_total, 131072)
         self.assertEqual(stats.active, 5)
         self.assertEqual(stats.kv_pct, 78.0)
 
     def test_sglang_metrics_and_server_info(self):
         MockHandler.routes = {
             "/metrics": (SGLANG_METRICS, 200),
-            "/get_server_info": ({"model_path": "/m/Qwen3-32B"}, 200),
+            "/get_server_info": ({"model_path": "/m/Qwen3-32B",
+                                  "context_length": 65536}, 200),
         }
         stats = fetch_stats(self.service("sglang"))
 
         self.assertEqual(stats.model, "Qwen3-32B")
+        self.assertEqual(stats.ctx_total, 65536)
         self.assertEqual(stats.decode_tps, 52.5)
 
     def test_api_key_is_sent_as_a_bearer_token(self):
@@ -336,6 +340,8 @@ class RecentRequestTests(unittest.TestCase):
         self.assertEqual(rows[0].output, 90)
         self.assertAlmostEqual(rows[0].duration, 3.0)
         self.assertAlmostEqual(rows[0].tps, 30.0)
+        self.assertIsNone(rows[0].first_ms)
+        self.assertIsNone(rows[0].cached)
 
     def test_switching_service_clears_the_history(self):
         feed = ModelFeed(clock=lambda: 1.0)

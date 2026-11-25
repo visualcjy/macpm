@@ -574,6 +574,10 @@ class ModelView:
                 _rate(row.tps) if row.tps else "-",
                 _duration(row.duration),
             )
+            text += "  first {}".format(
+                _ttft(row.first_ms) if row.first_ms is not None else "--")
+            text += "  cached {}".format(
+                _tokens(row.cached) if row.cached else "--")
             lines.append(field("recent" if index == 0 else "", text, MUTED))
         return lines
 

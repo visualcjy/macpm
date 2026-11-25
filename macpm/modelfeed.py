@@ -77,6 +77,8 @@ class RequestRow:
     output: Optional[int] = None
     tps: Optional[float] = None
     duration: float = 0.0
+    first_ms: Optional[float] = None
+    cached: Optional[int] = None
 
 
 def _http_json(host: str, port: int, path: str, key: str = "") -> dict:
@@ -168,6 +170,10 @@ def parse_splash(payload: dict, at: float = 0.0) -> ModelStats:
             "rid": str(row.get("id") or row.get("request_id") or ""),
             "prompt": _int(row.get("prompt_tokens")),
             "output": _int(row.get("generated_tokens")),
+            "first": _number((row.get("request_latency") or {}).get("ttft_ms")
+                             if isinstance(row.get("request_latency"), dict)
+                             else row.get("ttft_ms")),
+            "cached": _int(row.get("cached_tokens")),
         }
         for row in active
         if row.get("id") or row.get("request_id")
@@ -429,13 +435,16 @@ class ModelFeed:
             if not rid:
                 continue
             seen[rid] = row
-            start, prompt, _ = self._active.get(rid, (now, row.get("prompt"), 0))
+            start, prompt, _, first, cached = self._active.get(
+                rid, (now, row.get("prompt"), 0, row.get("first"), row.get("cached")))
             self._active[rid] = (
                 start,
                 prompt if prompt is not None else row.get("prompt"),
                 row.get("output") or 0,
+                first if first is not None else row.get("first"),
+                cached if cached is not None else row.get("cached"),
             )
-        for rid, (start, prompt, output) in list(self._active.items()):
+        for rid, (start, prompt, output, first, cached) in list(self._active.items()):
             if rid in seen:
                 continue
             duration = max(0.0, now - start)
@@ -447,6 +456,8 @@ class ModelFeed:
                 output=output,
                 tps=tps,
                 duration=duration,
+                first_ms=first,
+                cached=cached,
             ))
             del self._active[rid]
         del self._recent[8:]
@@ -516,21 +527,24 @@ def _fetch_ollama(service: Service, key: str) -> ModelStats:
     return parse_ollama(_http_json(service.host, service.port, "/api/ps", key))
 
 
-def _model_name(host: str, port: int, key: str) -> str:
+def _model_info(host: str, port: int, key: str) -> dict:
     try:
         payload = _http_json(host, port, "/v1/models", key)
         data = payload.get("data") or []
         if data:
-            return str(data[0].get("id") or "")
+            return data[0]
     except Exception:
         pass
-    return ""
+    return {}
 
 
 def _fetch_vllm(service: Service, key: str) -> ModelStats:
     metrics = parse_prometheus(
         _http_text(service.host, service.port, "/metrics", key))
-    return parse_vllm(metrics, _model_name(service.host, service.port, key))
+    info = _model_info(service.host, service.port, key)
+    stats = parse_vllm(metrics, str(info.get("id") or ""))
+    stats.ctx_total = _int(info.get("max_model_len"))
+    return stats
 
 
 def _fetch_sglang(service: Service, key: str) -> ModelStats:
@@ -540,7 +554,9 @@ def _fetch_sglang(service: Service, key: str) -> ModelStats:
         info = _http_json(service.host, service.port, "/get_server_info", key)
     except Exception:
         info = {}
-    return parse_sglang(metrics, info)
+    stats = parse_sglang(metrics, info)
+    stats.ctx_total = _int(info.get("context_length"))
+    return stats
 
 
 _FETCHERS = {
