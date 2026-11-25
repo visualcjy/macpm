@@ -21,6 +21,7 @@ from .theme import (
     KEY,
     OK,
     WARN,
+    metric_spans,
     HINT,
     LABEL,
     MUTED,
@@ -442,7 +443,7 @@ class ModelView:
     def _detail_lines(self, service: Service, inner: int,
                       stats: Optional[ModelStats]) -> list:
         def field(name: str, value: str, role: str = VALUE) -> list:
-            return [(_pad(name, 10), KEY), (_fit(value, inner - 10), role)]
+            return [(_pad(name, 10), KEY)] + metric_spans(_fit(value, inner - 10), LABEL)
 
         model = (stats.model if stats and stats.model else service.model) or "-"
         lines = [
@@ -637,13 +638,14 @@ class ModelView:
         key, title, big, sub, kind, value = card
         inner = width - 4
         dashes = "\u2500" * max(0, width - 5 - len(title))
-        top = [("\u250c\u2500 ", None), (title, TITLE), (" ", None), (dashes, None), ("\u2510", None)]
+        top = [("\u250c\u2500 ", None), (title, BOX), (" ", None), (dashes, None), ("\u2510", None)]
         bottom = [("\u2514", None), ("\u2500" * (width - 2), None), ("\u2518", None)]
         if height <= 3:
-            return [top, [("\u2502 ", None), (_pad(big, inner), VALUE), (" \u2502", None)], bottom]
+            return [top, [("\u2502 ", None)] + metric_spans(_pad(big, inner), LABEL)
+                    + [(" \u2502", None)], bottom]
         out = [top,
-               [("\u2502 ", None), (_pad(big, inner), VALUE), (" \u2502", None)],
-               [("\u2502 ", None), (_pad(sub, inner), LABEL), (" \u2502", None)]]
+               [("\u2502 ", None)] + metric_spans(_pad(big, inner), LABEL) + [(" \u2502", None)],
+               [("\u2502 ", None)] + metric_spans(_pad(sub, inner), LABEL) + [(" \u2502", None)]]
         chart_rows = max(0, height - 4)
         history = self._history.get(key, []) if kind == "chart" else []
         for index in range(chart_rows):
@@ -670,8 +672,10 @@ class ModelView:
         for offset in range(width):
             index = offset - (width - len(window))
             value = window[index] if 0 <= index < len(window) else 0.0
-            level = max(0.0, min(1.0, value / peak)) * height
-            text.append("\u2588" if level > (height - 1 - line) else " ")
+            level = max(0.0, min(1.0, value / peak)) * height * 8.0
+            eighths = level - (height - 1 - line) * 8.0
+            step = int(round(max(0.0, min(8.0, eighths))))
+            text.append(" \u2581\u2582\u2583\u2584\u2585\u2586\u2587\u2588"[step])
         return "".join(text)
 
     def _spark(self, values: list) -> str:
@@ -687,7 +691,7 @@ class ModelView:
              lines: list, palette: Palette) -> list:
         inner = max(0, width - 4)
         out = [term.move(top, 0) + palette.accent() + _border(width, "") + RESET_FG,
-               term.move(top, 2) + palette.style(TITLE) + _fit(" " + title, inner) + RESET_FG]
+               term.move(top, 2) + palette.style(BOX) + _fit(" " + title, inner) + RESET_FG]
         body = max(0, height - 2)
         for index in range(body):
             line = lines[index] if index < len(lines) else ""
