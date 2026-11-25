@@ -115,6 +115,7 @@ def identify(argv: list) -> Optional[Backend]:
         return None
     name = _argv0(argv)
     joined = " ".join(argv)
+    lower = joined.lower()
     if "vllm" in joined and ("serve" in argv or "vllm.entrypoints" in joined):
         return _BY_KEY["vllm"]
     if "sglang" in joined and ("launch_server" in joined or "serve" in argv):
@@ -123,10 +124,12 @@ def identify(argv: list) -> Optional[Backend]:
         return _BY_KEY["llama.cpp"]
     if name == "ollama" and "serve" in argv:
         return _BY_KEY["ollama"]
-    if name == "omlx" and ("serve" in argv or "start" in argv):
-        return _BY_KEY["omlx"]
-    if name == "splash" and "serve" in argv:
+    # The desktop apps launch their own Python runtime, so the binary name says
+    # nothing; the bundle path does.
+    if name == "splash" or "splash.app" in lower or "/splash/" in lower:
         return _BY_KEY["splash"]
+    if name == "omlx" or "omlx.app" in lower or "/.omlx/" in lower:
+        return _BY_KEY["omlx"]
     return None
 
 

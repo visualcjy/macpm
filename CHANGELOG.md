@@ -11,6 +11,13 @@
   accepts a local TCP connection, and every row stays `unverified` until the
   metrics feed lands. `↑/↓` selects, `s` sorts by port/backend/model, `Space`
   pauses and `r` rescans; `--model-url host:port` adds an endpoint by hand.
+- Model view metrics for **Splash** (`GET /status`: decode/prefill rates, TTFT
+  percentiles, active phases, context, KV, memory, thermal) and **oMLX**
+  (`GET /admin/api/activity`: the current model's active/waiting requests,
+  per-request decode speed and prefill progress, model memory). Only the
+  selected row is polled — once a second, 1.5 s deadline, 1 MiB cap — and a
+  `401`/`403` becomes `auth` instead of a blank row. Keys come from
+  `SPLASH_API_KEY` / `OMLX_API_KEY`.
 
 ## 3.3.1 — 2026-11-25
 

@@ -1,0 +1,272 @@
+"""Read-only metrics for the selected model service.
+
+The feed polls exactly one endpoint — the service the view has selected — with
+a short deadline and a hard response cap, keeping the "no idle traffic" rule
+from the design: nothing is fetched for rows the user has not looked at.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import threading
+import time
+import urllib.error
+import urllib.request
+from dataclasses import dataclass, field
+from typing import Callable, Optional
+
+from .serviceregistry import Service
+
+TIMEOUT = 1.5
+MAX_BYTES = 1 << 20          # 1 MiB, the same cap netinfo uses
+DEFAULT_TTL = 1.0
+STALE_AFTER = 3.0
+
+_KEYS = {
+    "splash": "SPLASH_API_KEY",
+    "omlx": "OMLX_API_KEY",
+}
+
+
+@dataclass
+class ModelStats:
+    """What the detail panel shows for one polled service."""
+
+    state: str = "unverified"          # live | stale | auth | error | no-telemetry
+    model: str = ""
+    decode_tps: Optional[float] = None
+    prefill_tps: Optional[float] = None
+    active: Optional[int] = None
+    waiting: Optional[int] = None
+    phases: dict = field(default_factory=dict)
+    ttft_p50_ms: Optional[float] = None
+    ttft_p95_ms: Optional[float] = None
+    ctx_used: Optional[int] = None
+    ctx_total: Optional[int] = None
+    kv_used: Optional[float] = None     # bytes
+    kv_total: Optional[float] = None    # bytes
+    mem_used: Optional[float] = None    # bytes
+    mem_peak: Optional[float] = None
+    requests: Optional[int] = None
+    failed: Optional[int] = None
+    thermal: str = ""
+    note: str = ""
+    at: float = 0.0
+
+
+def _http_json(host: str, port: int, path: str, key: str = "") -> dict:
+    url = f"http://{host}:{port}{path}"
+    headers = {"Accept": "application/json", "User-Agent": "macpm"}
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+    request = urllib.request.Request(url, headers=headers)
+    with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
+        if getattr(response, "status", 200) != 200:
+            raise ValueError(f"HTTP {getattr(response, 'status', 0)}")
+        payload = response.read(MAX_BYTES)
+    return json.loads(payload.decode("utf-8", "replace"))
+
+
+def _key_for(backend: str) -> str:
+    name = _KEYS.get(backend)
+    return (os.environ.get(name or "", "") or "").strip()
+
+
+def parse_splash(payload: dict, at: float = 0.0) -> ModelStats:
+    """Splash ``GET /status`` → one card's worth of numbers."""
+    stats = ModelStats(state="live", at=at)
+    metrics = payload.get("metrics") or {}
+    stats.decode_tps = _number(metrics.get("decode_tokens_per_second"))
+    stats.prefill_tps = _number(metrics.get("prefill_tokens_per_second"))
+    ttft = metrics.get("ttft_ms") or {}
+    stats.ttft_p50_ms = _number(ttft.get("p50"))
+    stats.ttft_p95_ms = _number(ttft.get("p95"))
+
+    active = payload.get("active_requests") or []
+    stats.active = len(active)
+    for row in active:
+        phase = str(row.get("phase") or "").strip()
+        if phase:
+            stats.phases[phase] = stats.phases.get(phase, 0) + 1
+    stats.ctx_used = sum(
+        int(row.get("prompt_tokens") or 0) + int(row.get("generated_tokens") or 0)
+        for row in active
+    ) or None
+    stats.ctx_total = _int(payload.get("maximum_context_tokens")) or _int(
+        (payload.get("capabilities") or {}).get("max_context_tokens")
+    )
+
+    kv = payload.get("kv") or {}
+    budget = (payload.get("memory_plan") or {}).get("budget") or {}
+    stats.kv_used = _number(kv.get("allocated_bytes"))
+    stats.kv_total = (
+        _number(budget.get("hard_budget_bytes"))
+        or _number((payload.get("memory_plan") or {}).get("hard_budget_bytes"))
+    )
+    memory = payload.get("memory_actual") or {}
+    stats.mem_used = _number(memory.get("current_bytes"))
+    stats.mem_peak = _number(memory.get("peak_bytes"))
+
+    requests = payload.get("requests") or {}
+    stats.requests = _int(requests.get("completed"))
+    stats.failed = _int(requests.get("failed"))
+    stats.thermal = str(payload.get("thermal_state") or "")
+    model = payload.get("model") or payload.get("model_name") or ""
+    stats.model = str(model)
+    if not payload.get("ready", True):
+        stats.state = "stale"
+        stats.note = "engine not ready"
+    return stats
+
+
+def _current_omlx_model(active: dict) -> dict:
+    """The model the dashboard would call current: busy, else most recent."""
+    models = [m for m in (active.get("models") or []) if m.get("loaded", True)]
+    if not models:
+        return {}
+    for model in models:
+        if (model.get("active_requests") or 0) + (model.get("waiting_requests") or 0) > 0:
+            return model
+    busy = [m for m in models if m.get("idle_seconds") is not None]
+    if busy:
+        return min(busy, key=lambda m: float(m.get("idle_seconds") or 0.0))
+    return models[0]
+
+
+def parse_omlx(payload: dict, at: float = 0.0) -> ModelStats:
+    """oMLX ``GET /admin/api/activity`` → one card's worth of numbers."""
+    active = payload.get("active_models") or payload
+    model = _current_omlx_model(active)
+    stats = ModelStats(state="live", at=at)
+    if not model:
+        stats.state = "no-telemetry"
+        stats.note = "no loaded model"
+        return stats
+
+    stats.model = str(model.get("id") or model.get("model") or "")
+    stats.active = _int(model.get("active_requests")) or 0
+    stats.waiting = _int(model.get("waiting_requests")) or 0
+    generating = model.get("generating") or []
+    prefilling = model.get("prefilling") or []
+    speeds = [_number(row.get("tokens_per_second")) for row in generating]
+    speeds = [speed for speed in speeds if speed]
+    if speeds:
+        stats.decode_tps = sum(speeds)
+    prefill = [_number(row.get("speed")) for row in prefilling]
+    prefill = [speed for speed in prefill if speed]
+    if prefill:
+        stats.prefill_tps = sum(prefill)
+    if generating:
+        stats.phases["decode"] = len(generating)
+    if prefilling:
+        stats.phases["prefill"] = len(prefilling)
+    stats.ctx_used = sum(
+        int(row.get("prompt_tokens") or 0) + int(row.get("generated_tokens") or 0)
+        for row in generating + prefilling
+    ) or None
+    stats.mem_used = _number(active.get("model_memory_used"))
+    stats.mem_peak = _number(active.get("model_memory_max"))
+    stats.requests = _int(active.get("total_active_requests"))
+    return stats
+
+
+_PARSERS = {"splash": parse_splash, "omlx": parse_omlx}
+_PATHS = {"splash": "/status", "omlx": "/admin/api/activity"}
+
+
+def _number(value) -> Optional[float]:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _int(value) -> Optional[int]:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+class ModelFeed:
+    """One background poll for the currently selected service."""
+
+    def __init__(
+        self,
+        clock: Callable[[], float] = time.monotonic,
+        ttl: float = DEFAULT_TTL,
+        fetcher: Optional[Callable[[Service, str], ModelStats]] = None,
+    ):
+        self.clock = clock
+        self.ttl = max(0.2, float(ttl))
+        self._fetcher = fetcher or fetch_stats
+        self._lock = threading.Lock()
+        self._service: Optional[Service] = None
+        self._stats: Optional[ModelStats] = None
+        self._next = 0.0
+        self._thread: Optional[threading.Thread] = None
+        self._at = 0.0
+
+    # -- selection ---------------------------------------------------------
+
+    def select(self, service: Optional[Service]) -> None:
+        with self._lock:
+            identity = service.identity if service is not None else None
+            current = self._service.identity if self._service is not None else None
+            if identity == current:
+                return
+            self._service = service
+            self._stats = None
+            self._next = 0.0
+
+    def snapshot(self) -> Optional[ModelStats]:
+        with self._lock:
+            return self._stats
+
+    # -- polling -----------------------------------------------------------
+
+    def maybe_refresh(self) -> None:
+        with self._lock:
+            if self._service is None:
+                return
+            if self._thread is not None and self._thread.is_alive():
+                return
+            if self.clock() < self._next:
+                return
+            service = self._service
+            self._next = self.clock() + self.ttl
+            thread = threading.Thread(
+                target=self._load, args=(service,), daemon=True
+            )
+            self._thread = thread
+        thread.start()
+
+    def _load(self, service: Service) -> None:
+        try:
+            stats = self._fetcher(service, _key_for(service.backend))
+        except urllib.error.HTTPError as error:
+            stats = ModelStats(
+                state="auth" if error.code in (401, 403) else "error",
+                note=f"HTTP {error.code}",
+            )
+        except Exception as error:  # timeouts, bad JSON, refused connections
+            stats = ModelStats(state="error", note=str(error)[:80])
+        stats.at = self.clock()
+        with self._lock:
+            # Drop the result if the user moved on to another service.
+            if self._service is not None and self._service.identity == service.identity:
+                self._stats = stats
+
+
+def fetch_stats(service: Service, key: str = "") -> ModelStats:
+    """Fetch and parse one service; raises for transport errors."""
+    path = _PATHS.get(service.backend)
+    parser = _PARSERS.get(service.backend)
+    if path is None or parser is None:
+        return ModelStats(state="no-telemetry", note="adapter not implemented")
+    payload = _http_json(service.host, service.port, path, key)
+    stats = parser(payload)
+    if not stats.model:
+        stats.model = service.model
+    return stats

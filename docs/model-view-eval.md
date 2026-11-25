@@ -5,11 +5,12 @@
 
 评估范围：**只读**监控本机 / 本机容器内的模型服务；不启动、不停止、不加载模型；不覆盖远端主机。
 
-> **实现状态（2026-11-25）：P0 + P1 已落地，指标层未开始。**
-> `macpm/serviceregistry.py` 实现了零 HTTP 的服务发现（进程指纹 + 本地 TCP 校验 + 手动端点），
-> `macpm/modelview.py` 提供列表/详情与单服务卡片骨架，绑定为视图 `6`，`--model-url` 可手填端点。
-> §4 的指标字段、§5.4 的 recent requests 与 §6 的"选中即探测"尚未实现，因此每一行显示
-> `unverified`。文中"拿得到/拿不到"的结论来自各后端公开文档与源码，尚未逐项实测。
+> **实现状态（2026-11-25）：P0 + P1 已落地，P2 完成了 Splash 与 oMLX。**
+> `macpm/serviceregistry.py` 实现零 HTTP 的服务发现（进程指纹 + 本地 TCP 校验 + 手动端点，
+> 已适配 Splash.app / oMLX.app 的 bundle 启动方式）；`macpm/modelview.py` 提供列表/详情与
+> 单服务卡片；`macpm/modelfeed.py` 在**选中时**每秒轮询一次（1.5 s 超时、1 MiB 上限），
+> 目前接了 Splash `/status` 与 oMLX `/admin/api/activity`，vLLM / SGLang / llama.cpp /
+> ollama 的适配器（§5.4 与 A 档字段）尚未实现。未轮询的行仍显示 `unverified`。
 
 ---
 
