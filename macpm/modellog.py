@@ -10,7 +10,10 @@ from __future__ import annotations
 
 import os
 import re
+import subprocess
 import time
+import urllib.request
+from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
@@ -116,3 +119,68 @@ class SplashLogReader:
                     "tps": _number(rate),
                 })
         return rows
+
+
+class CommandTail:
+    """Read new lines by re-running a bounded command (docker/kubectl logs)."""
+
+    def __init__(self, command, timeout: float = 10.0):
+        self.command = list(command)
+        self.timeout = timeout
+        self._seen: deque = deque(maxlen=500)
+
+    def read(self) -> list:
+        try:
+            result = subprocess.run(
+                self.command, capture_output=True, text=True,
+                timeout=self.timeout, stdin=subprocess.DEVNULL,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return []
+        lines = (result.stdout or "").splitlines()
+        fresh = [line for line in lines if line not in self._seen]
+        self._seen.extend(fresh)
+        return fresh
+
+
+class HttpTail:
+    """Tail a plain-text log endpoint (oMLX ``/admin/api/logs``)."""
+
+    def __init__(self, url: str, timeout: float = 3.0):
+        self.url = url
+        self.timeout = timeout
+        self._seen: deque = deque(maxlen=500)
+
+    def read(self) -> list:
+        try:
+            with urllib.request.urlopen(self.url, timeout=self.timeout) as response:
+                text = response.read(1 << 20).decode("utf-8", "replace")
+        except (OSError, ValueError):
+            return []
+        fresh = [line for line in text.splitlines() if line not in self._seen]
+        self._seen.extend(fresh)
+        return fresh
+
+
+VLLM_STATS = re.compile(
+    r"Engine \d+: Avg prompt throughput: ([\d.]+) tokens/s, "
+    r"Avg generation throughput: ([\d.]+) tokens/s, "
+    r"Running: (\d+) reqs, Waiting: (\d+) reqs, "
+    r"GPU KV cache usage: ([\d.]+)%, Prefix cache hit rate: ([\d.]+)%"
+)
+
+
+def parse_vllm_stats(line: str):
+    """One ``Engine 000:`` stats line -> dict, or ``None``."""
+    match = VLLM_STATS.search(line or "")
+    if not match:
+        return None
+    prefill, decode, running, waiting, kv, hit = match.groups()
+    return {
+        "prefill_tps": float(prefill),
+        "decode_tps": float(decode),
+        "active": int(running),
+        "waiting": int(waiting),
+        "kv_pct": float(kv),
+        "prefix_hit": float(hit),
+    }

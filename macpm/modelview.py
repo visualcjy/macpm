@@ -559,6 +559,8 @@ class ModelView:
             if stats.mem_peak:
                 text += " · peak {}".format(_gib(stats.mem_peak))
             lines.append(field("memory", text))
+        if stats.prefix_hit is not None:
+            lines.append(field("cache hit", "{:.1f}%  prefix".format(stats.prefix_hit)))
         if stats.requests is not None:
             text = "{} done".format(stats.requests)
             if stats.failed:

@@ -17,7 +17,10 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Callable, Optional
 
-from .modellog import DEFAULT_SPLASH_LOG, SplashLogReader
+from .modellog import (
+    DEFAULT_SPLASH_LOG, CommandTail, HttpTail, LogTail, SplashLogReader,
+    parse_vllm_stats,
+)
 from .serviceregistry import Service
 
 TIMEOUT = 1.5
@@ -55,6 +58,7 @@ class ModelStats:
     kv_total: Optional[float] = None    # bytes
     kv_pct: Optional[float] = None      # 0-100 when the server reports a ratio
     decode_observed: Optional[float] = None   # tokens/s seen between polls
+    prefix_hit: Optional[float] = None        # vLLM prefix cache hit rate
     gen_tokens: Optional[int] = None    # counters kept for client-side rates
     prompt_tokens: Optional[int] = None
     mem_used: Optional[float] = None    # bytes
@@ -414,16 +418,49 @@ class ModelFeed:
         with self._lock:
             return list(self._recent)
 
+    def _make_log_source(self, service: Service):
+        """``MACPM_<BACKEND>_LOG`` (file) or ``_LOG_CMD`` / ``_LOG_URL``."""
+        prefix = {"splash": "SPLASH", "vllm": "VLLM",
+                  "sglang": "SGLANG", "ollama": "OLLAMA",
+                  "llama.cpp": "LLAMACPP"}.get(service.backend)
+        if prefix is None:
+            return None
+        if service.backend == "splash":
+            return SplashLogReader(os.environ.get("SPLASH_LOG", DEFAULT_SPLASH_LOG))
+        cmd = os.environ.get(prefix + "_LOG_CMD")
+        if cmd:
+            import shlex
+            return CommandTail(shlex.split(cmd))
+        url = os.environ.get(prefix + "_LOG_URL")
+        if url:
+            return HttpTail(url)
+        path = os.environ.get(prefix + "_LOG")
+        if path:
+            return LogTail(path)
+        return None
+
     def _read_log(self, service: Service) -> bool:
         """Pull real per-request rows from the server's own log."""
         if service.backend != "splash":
             return False
         reader = self._logs.get(service.identity)
         if reader is None:
-            path = os.environ.get("SPLASH_LOG", DEFAULT_SPLASH_LOG)
-            reader = SplashLogReader(path)
+            reader = self._make_log_source(service)
+            if reader is None:
+                return False
             self._logs[service.identity] = reader
-        if not reader.tail.exists():
+        if service.backend == "vllm":
+            latest = None
+            for line in reader.read():
+                parsed = parse_vllm_stats(line)
+                if parsed:
+                    latest = parsed
+            if latest is None:
+                return False
+            for key, value in latest.items():
+                setattr(stats, key, value)
+            return True
+        if not getattr(reader, "tail", None) or not reader.tail.exists():
             return False
         got = False
         for entry in reader.poll():
