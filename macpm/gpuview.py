@@ -35,7 +35,7 @@ from .processes import ProcessRow, ProcessSampler
 from .theme import BOX, KEY, LABEL, OK, TITLE, Palette, footer_spans, metric_spans, paint_spans, severity, title_spans
 from .tui import RESET_FG, _border, _bottom, _center, _fit, _format_mem, _pad, _text_width, footer
 
-_SORTS = ["gpu", "pid", "name", "user"]
+_SORTS = ["gpu", "mem", "pid", "name", "user"]
 _HEADER = {
     "pid": "PID",
     "name": "NAME",
@@ -535,7 +535,8 @@ class GpuView:
             return
         index = (_SORTS.index(self.sort) + 1) % len(_SORTS) if self.sort in _SORTS else 0
         self.sort = _SORTS[index]
-        self.desc = self.sort == "gpu"
+        # Highest GPU time or GPU memory first; the rest are name/id orders.
+        self.desc = self.sort in ("gpu", "mem")
         self._sorted = None
         self.offset = 0
 
@@ -567,6 +568,7 @@ class GpuView:
                     row.gpu_mem_mb or 0.0,
                     -row.pid,
                 ),
+                "mem": lambda row: (_gpu_memory_mb(row) or 0.0, -row.pid),
                 "pid": lambda row: row.pid,
                 "name": lambda row: (row.name.lower(), row.pid),
                 "user": lambda row: (row.user.lower(), row.pid),
@@ -910,7 +912,8 @@ class GpuView:
             "card": 5,
             "user": 9,
             "gpu": 6,
-            "mem": 7,
+            # Wide enough for "GPU MEM ↓" so the sort arrow is never clipped.
+            "mem": 9,
             "shared": 7,
             "model": 18,
         }

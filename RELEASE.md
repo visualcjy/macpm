@@ -1,4 +1,4 @@
-# Releasing macpm 3.3.0
+# Releasing macpm 3.3.1
 
 This checklist prepares a GitHub tag and a PyPI upload.  It does not push or
 publish anything by itself.
@@ -7,11 +7,11 @@ publish anything by itself.
 
 - macOS Apple Silicon, Python 3.9+.
 - Clean working tree (`git status`), all tests passing.
-- Version is `3.3.0` in:
+- Version is `3.3.1` in:
   - `setup.py`
   - `macpm/__init__.py` (`__version__`)
   - the banner and `--version` derive from it (`macpm/macpm.py`)
-- `CHANGELOG.md` has the `3.3.0` entry.
+- `CHANGELOG.md` has the `3.3.1` entry.
 
 ## 2. Test from source
 
@@ -38,7 +38,7 @@ Test the wheel in a **clean** venv (this is the real "no source tree" test):
 
 ```sh
 python3 -m venv /tmp/macpm-wheel-test
-/tmp/macpm-wheel-test/bin/pip install dist/macpm-3.3.0-py3-none-any.whl
+/tmp/macpm-wheel-test/bin/pip install dist/macpm-3.3.1-py3-none-any.whl
 /tmp/macpm-wheel-test/bin/macpm --help
 /tmp/macpm-wheel-test/bin/macpm-dump   # Ctrl+C
 ```
@@ -78,13 +78,13 @@ Manual alternative (fallback, e.g. when OIDC is unavailable):
 ```sh
 # requires a PyPI API token in ~/.pypirc or TWINE_PASSWORD
 python3 -m twine upload --non-interactive \
-    dist/macpm-3.3.0.tar.gz dist/macpm-3.3.0-py3-none-any.whl
+    dist/macpm-3.3.1.tar.gz dist/macpm-3.3.1-py3-none-any.whl
 ```
 
 Then verify:
 
 ```sh
-python3 -m pip install --upgrade macpm==3.3.0
+python3 -m pip install --upgrade macpm==3.3.1
 macpm --version
 ```
 
@@ -93,10 +93,10 @@ macpm --version
 ```sh
 git add setup.py pyproject.toml MANIFEST.in README.md CHANGELOG.md RELEASE.md \
         macpm packaging tests .github bin
-git commit -m "Release macpm 3.3.0: built-in semantic colour theme"
-git tag -a v3.3.0 -m "macpm 3.3.0"
+git commit -m "Release macpm 3.3.1: macOS 27 power fallback and GPU sort fixes"
+git tag -a v3.3.1 -m "macpm 3.3.1"
 git push origin main
-git push origin v3.3.0
+git push origin v3.3.1
 ```
 
 The `Release` workflow builds the sdist/wheel, checks metadata and attaches
@@ -122,7 +122,7 @@ PYTHON=python3 packaging/build.sh
 This produces:
 
 ```text
-dist/macpm-3.3.0-macos-arm64.tar.gz
+dist/macpm-3.3.1-macos-arm64.tar.gz
 ```
 
 Attach it to the GitHub release.  The binaries are ad-hoc signed, not
@@ -148,10 +148,10 @@ The first run downloads python-build-standalone (cached in
 `~/.cache/macpm-build/pbs`) and produces:
 
 ```text
-dist/macpm-3.3.0-linux-x86_64.tar.gz
-dist/macpm-3.3.0-linux-aarch64.tar.gz
-dist/macpm_3.3.0_amd64.deb
-dist/macpm_3.3.0_arm64.deb
+dist/macpm-3.3.1-linux-x86_64.tar.gz
+dist/macpm-3.3.1-linux-aarch64.tar.gz
+dist/macpm_3.3.1_amd64.deb
+dist/macpm_3.3.1_arm64.deb
 ```
 
 Both architectures keep a glibc 2.17 floor.  Building x86_64 on an arm64 host

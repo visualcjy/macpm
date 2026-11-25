@@ -337,7 +337,7 @@ shows `n/a` and the reason stays in the data
 
 A single-GPU machine keeps the older layout: card summary on top, process table
 below.  Every view's footer starts with the app name and version
-(`macpm v3.3.0 · q quit …`).
+(`macpm v3.3.1 · q quit …`).
 
 ```text
 ┌ GPU INFO ────────────────────────────────────────────────────────────────────────────────┐
@@ -351,7 +351,7 @@ below.  Every view's footer starts with the app name and version
 │       └ 222 Xorg 2.0G                                                                    │
 │   2 AMD GPU (amdgpu)          ▉▉▉▉▏▏  60% 1100/1750   12.0W  ▉▉▉▉▏▏▏▏▏▏  3.0G/8.0G  46°C │
 │   3 AMD GPU (amdgpu)          ▉▉▉▉▉▏  85% 1200/1750   12.0W  ▉▉▉▉▉▏▏▏▏▏  4.0G/8.0G  49°C │
-└ macpm v3.3.0 · q quit  1-5 view  s sort  ↑/↓ page  Space pause  ←/→ colour ────────────────┘
+└ macpm v3.3.1 · q quit  1-5 view  s sort  ↑/↓ page  Space pause  ←/→ colour ────────────────┘
 ```
 
 | Platform | What fills each row |
@@ -647,9 +647,12 @@ Release steps are documented in [RELEASE.md](https://github.com/visualcjy/macpm/
 - **`macpm: command not found`** — add your Python user-base `bin` directory to
   `PATH`, or run `python3 -m macpm`.
 - **Power readings freeze or show `n/a` on macOS 27** — some builds restrict
-  unprivileged `Energy Model` refreshes.  CPU/GPU usage and frequency still
-  work; a counter that never reports is shown as `n/a` instead of `0.00W`.
-  Run `macpm-dump` to inspect the raw values.
+  unprivileged `Energy Model` refreshes, and the CPU/ANE channels can stop
+  updating while the GPU one keeps working.  CPU/GPU usage and frequency still
+  work; a counter that has been silent for ten samples is shown as `n/a`
+  instead of `0.00W`, and the Power box then reads `Power (GPU only)`.  The
+  first frames of a session show `CPU: —` until a counter reports once.  Run
+  `macpm-dump` to inspect the raw values.
 - **M5/Ultra values look wrong** — CPU tier/channel mapping is not complete;
   see the compatibility table.
 - **The Temps & Fans box says `SMC unavailable`** — the AppleSMC user client

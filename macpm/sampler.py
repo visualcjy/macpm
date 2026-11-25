@@ -18,7 +18,9 @@ from .macos_gpu import physical_memory, read_device_stats
 from .metrics import (
     ENERGY_GRACE_SAMPLES,
     ENERGY_TO_J,
+    EnergyTracker,
     ane_usage,
+    energy_warming,
     calc_freq,
     energy_available,
     energy_to_joules,
@@ -46,6 +48,7 @@ _ENERGY_TO_J = ENERGY_TO_J
 _ENERGY_GRACE_SAMPLES = ENERGY_GRACE_SAMPLES
 _energy_to_joules = energy_to_joules
 _energy_available = energy_available
+_energy_warming = energy_warming
 _sane_energy = sane_energy
 
 
@@ -96,7 +99,7 @@ class Sampler:
         # Some macOS builds expose the Energy Model counters but never update
         # them without root.  Track whether a component has ever produced a
         # usable delta so the UI can say n/a instead of a misleading 0 W.
-        self._energy_seen = {"cpu": False, "gpu": False, "ane": False}
+        self._energy_trackers = {name: EnergyTracker() for name in ("cpu", "gpu", "ane")}
         self._sample_count = 0
 
         self.prev_time: Optional[float] = None
@@ -165,12 +168,9 @@ class Sampler:
         ane_percent = ane_usage(self._ane.delta() if self._ane is not None else {})
 
         self._sample_count += 1
-        if cpu_joules > 0.0:
-            self._energy_seen["cpu"] = True
-        if gpu_joules > 0.0:
-            self._energy_seen["gpu"] = True
-        if ane_joules > 0.0:
-            self._energy_seen["ane"] = True
+        self._energy_trackers["cpu"].add(cpu_joules)
+        self._energy_trackers["gpu"].add(gpu_joules)
+        self._energy_trackers["ane"].add(ane_joules)
 
         cpu_joules = _sane_energy(cpu_joules, elapsed, self._power_limits["cpu"])
         gpu_joules = _sane_energy(gpu_joules, elapsed, self._power_limits["gpu"])
@@ -200,16 +200,13 @@ class Sampler:
                 "cpu_energy": cpu_mj,
                 "gpu_energy": gpu_mj,
                 "combined_power": total_mj,
-                "cpu_energy_available": _energy_available(
-                    self._energy_seen["cpu"], self._sample_count
-                ),
-                "gpu_energy_available": _energy_available(
-                    self._energy_seen["gpu"], self._sample_count
-                ),
+                "cpu_energy_available": self._energy_trackers["cpu"].available(),
+                "gpu_energy_available": self._energy_trackers["gpu"].available(),
                 "ane_usage": ane_percent,
-                "ane_energy_available": _energy_available(
-                    self._energy_seen["ane"], self._sample_count
-                ),
+                "ane_energy_available": self._energy_trackers["ane"].available(),
+                "cpu_energy_warming": self._energy_trackers["cpu"].warming(),
+                "gpu_energy_warming": self._energy_trackers["gpu"].warming(),
+                "ane_energy_warming": self._energy_trackers["ane"].warming(),
             },
             "gpu": gpu_payload,
             "disk": self._disk_rates(elapsed),

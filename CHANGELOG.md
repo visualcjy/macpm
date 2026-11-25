@@ -1,6 +1,22 @@
 # Changelog
 
-## Unreleased
+## 3.3.1 — 2026-11-25
+
+### Fixed
+
+- GPU view: `s` now includes the process table's GPU-memory column on
+  single-card hosts (macOS, single-GPU Linux), where the sort cycle skipped it;
+  the `GPU MEM` header was widened so its `↓`/`↑` marker is not clipped.
+
+- macOS power panel on macOS 27: an energy counter that stops reporting — the
+  CPU/ANE `Energy Model` channels do this without root on newer builds — now
+  falls back to `n/a` once its last ten samples were silent, instead of
+  showing `0.00W` forever. Its stale peak, average and maximum are cleared at
+  the same time.
+- The Power box names the half that is still reporting (`Power (GPU only)` /
+  `Power (CPU only)`) instead of presenting a partial sum as package power.
+- A counter that has not produced a first reading yet shows `CPU: —` / `GPU: —`
+  for the first frames instead of a misleading `0.00W`.
 
 ### Changed
 

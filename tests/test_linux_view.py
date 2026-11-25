@@ -119,6 +119,43 @@ class ViewRenderTests(unittest.TestCase):
         self.assertNotIn("ANE", output)
         self.assertIn("Intel Core i7-12700H", output)
 
+    def test_power_panel_drops_a_frozen_counter(self):
+        sampler = LinuxSampler(1)
+        sampler.prime()
+        args = types.SimpleNamespace(color=2, show_cores=False, interval=1, avg=30)
+        view = DefaultView(
+            sampler.soc, args, netinfo=None, capabilities=sampler.capabilities
+        )
+        sample = sampler.sample()
+        processor = sample["processor"]
+        processor.update({
+            "cpu_energy": 4000.0, "gpu_energy": 8000.0,
+            "cpu_energy_available": True, "gpu_energy_available": True,
+            "cpu_energy_warming": False, "gpu_energy_warming": False,
+        })
+        with contextlib.redirect_stdout(io.StringIO()):
+            view.display(sample, args)
+
+        self.assertIn("CPU: 4.00W", view.cpu_power_chart.title)
+        self.assertTrue(view.power_charts.title.startswith("Power: "))
+
+        # The counter freezes after reporting: n/a, and its stale peak is gone.
+        processor.update({"cpu_energy": 0.0, "cpu_energy_available": False})
+        with contextlib.redirect_stdout(io.StringIO()):
+            view.display(sample, args)
+
+        self.assertEqual(view.cpu_power_chart.title, "CPU: n/a")
+        self.assertEqual(view.cpu_peak_power, 0.0)
+        self.assertEqual(view.cpu_max_power, view._cpu_max_power_default)
+        self.assertTrue(view.power_charts.title.startswith("Power (GPU only):"))
+
+        # Before the first usable sample the panel shows a dash, not 0.00 W.
+        processor.update({"cpu_energy_available": False, "cpu_energy_warming": True})
+        with contextlib.redirect_stdout(io.StringIO()):
+            view.display(sample, args)
+
+        self.assertEqual(view.cpu_power_chart.title, "CPU: —")
+
     def test_view_without_gpu_power_or_e_cores(self):
         sampler = LinuxSampler(1)
         sampler.prime()

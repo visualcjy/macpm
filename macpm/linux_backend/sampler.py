@@ -19,7 +19,7 @@ from typing import Optional
 import psutil
 
 from ..capabilities import Capabilities
-from ..metrics import energy_available, sane_energy
+from ..metrics import energy_available, energy_warming, sane_energy
 from .cpu import CpuSampler
 from .gpu import shared_backend
 from .power import EnergySampler
@@ -196,13 +196,12 @@ class LinuxSampler:
             "cpu_energy": cpu_joules * scale,
             "gpu_energy": gpu_joules * scale,
             "combined_power": combined_joules * scale,
-            "cpu_energy_available": energy_available(
-                self._seen["cpu"], self._sample_count
-            ),
-            "gpu_energy_available": energy_available(
-                self._seen["gpu"], self._sample_count
-            ),
+            "cpu_energy_available": energy_available(self._seen["cpu"]),
+            "gpu_energy_available": energy_available(self._seen["gpu"]),
             "ane_energy_available": False,
+            "cpu_energy_warming": energy_warming(self._sample_count),
+            "gpu_energy_warming": energy_warming(self._sample_count),
+            "ane_energy_warming": False,
             "power_source": energy["cpu_source"] or energy["system_source"],
         }
 

@@ -179,12 +179,27 @@ class SingleCardTests(unittest.TestCase):
         view = make_view([])
 
         seen = []
-        for _ in range(4):
+        for _ in range(5):
             seen.append((view.sort, view.desc))
             view.cycle_sort()
 
-        self.assertEqual(seen, [("gpu", True), ("pid", False),
+        self.assertEqual(seen, [("gpu", True), ("mem", True), ("pid", False),
                                 ("name", False), ("user", False)])
+
+    def test_processes_are_sorted_by_gpu_memory(self):
+        rows = [
+            ProcessRow(1, "tiny", "u", 0.0, 0, 0.0, gpu_card="0", gpu_mem_mb=1024.0),
+            ProcessRow(2, "huge", "u", 0.0, 0, 0.0, gpu_card="0", gpu_mem_mb=8192.0),
+            ProcessRow(3, "mid", "u", 0.0, 0, 0.0, gpu_card="0", gpu_mem_mb=2048.0),
+        ]
+        view = make_view(rows)
+        view.sort = "mem"
+        view.desc = True
+        view._sorted = None
+
+        self.assertEqual(
+            [row.name for row in view._visible_rows()], ["huge", "mid", "tiny"]
+        )
 
     def test_no_gpu_machine(self):
         caps = linux_caps(gpu_util=False, gpu_freq=False, gpu_power=False, proc_gpu=False)

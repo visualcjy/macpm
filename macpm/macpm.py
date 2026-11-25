@@ -250,6 +250,8 @@ def parse_cpu_metrics(powermetrics_parse):
     cpu_metric_dict["package_W"] = cpu_metrics.get("combined_power", 0) / 1000
     cpu_metric_dict["cpu_available"] = cpu_metrics.get("cpu_energy_available", True)
     cpu_metric_dict["gpu_available"] = cpu_metrics.get("gpu_energy_available", True)
+    cpu_metric_dict["cpu_warming"] = cpu_metrics.get("cpu_energy_warming", False)
+    cpu_metric_dict["gpu_warming"] = cpu_metrics.get("gpu_energy_warming", False)
     cpu_metric_dict["ane_available"] = cpu_metrics.get("ane_energy_available", True)
     cpu_metric_dict["power_source"] = cpu_metrics.get("power_source", "")
     return cpu_metric_dict
@@ -625,6 +627,12 @@ class DefaultView():
         self.avg_package_power_list = deque([], maxlen=max(1, int(args.avg / args.interval)))
         self.avg_cpu_power_list = deque([], maxlen=max(1, int(args.avg / args.interval)))
         self.avg_gpu_power_list = deque([], maxlen=max(1, int(args.avg / args.interval)))
+        # Peaks are reset when a counter stops reporting, so a frozen sensor
+        # cannot leave a stale maximum on screen.
+        self._cpu_max_power_default = soc_info_dict["cpu_max_power"]
+        self._gpu_max_power_default = soc_info_dict["gpu_max_power"]
+        self._cpu_power_seen = False
+        self._gpu_power_seen = False
 
     def _processor_width(self, width):
         if not self.show_cores:
@@ -929,6 +937,20 @@ class DefaultView():
 
             cpu_available = cpu_metrics_dict["cpu_available"]
             gpu_available = cpu_metrics_dict["gpu_available"]
+            cpu_warming = cpu_metrics_dict.get("cpu_warming", False)
+            gpu_warming = cpu_metrics_dict.get("gpu_warming", False)
+            # A counter that froze after reporting once keeps a stale peak;
+            # drop it so the panel shows n/a rather than a stale maximum.
+            if self._cpu_power_seen and not (cpu_available or cpu_warming):
+                self.cpu_peak_power = 0.0
+                self.cpu_max_power = self._cpu_max_power_default
+                self.avg_cpu_power_list.clear()
+            if self._gpu_power_seen and not (gpu_available or gpu_warming):
+                self.gpu_peak_power = 0.0
+                self.gpu_max_power = self._gpu_max_power_default
+                self.avg_gpu_power_list.clear()
+            self._cpu_power_seen = cpu_available
+            self._gpu_power_seen = gpu_available
             power_source = cpu_metrics_dict.get("power_source", "")
             power_note = " (battery)" if power_source == "battery" else ""
 
@@ -941,7 +963,11 @@ class DefaultView():
                     self.avg_package_power_list.append(package_power_W)
                     avg_package_power = get_avg(self.avg_package_power_list)
                     self.power_charts.title = "".join([
-                        "Power: ",
+                        # A warming counter is unknown, not missing: keep the
+                        # plain label so the title does not flicker.
+                        power_label(cpu_available or cpu_warming,
+                                    gpu_available or gpu_warming),
+                        ": ",
                         '{0:.2f}'.format(package_power_W),
                         "W (avg: ",
                         '{0:.2f}'.format(avg_package_power),
@@ -975,6 +1001,8 @@ class DefaultView():
                             "W)"
                         ])
                         self.cpu_power_chart.append(cpu_power_percent)
+                    elif cpu_warming:
+                        self.cpu_power_chart.title = "CPU: —"
                     else:
                         self.cpu_power_chart.title = "CPU: n/a"
                         self.cpu_power_chart.append(0)
@@ -1000,6 +1028,8 @@ class DefaultView():
                             "W)"
                         ])
                         self.gpu_power_chart.append(gpu_power_percent)
+                    elif gpu_warming:
+                        self.gpu_power_chart.title = "GPU: —"
                     else:
                         self.gpu_power_chart.title = "GPU: n/a"
                         self.gpu_power_chart.append(0)
@@ -1089,6 +1119,22 @@ def _ram_detail_line(ram_metrics_dict, platform):
         ram_metrics_dict["inactive_GB"],
         ram_metrics_dict["phys_free_GB"],
     )
+
+
+def power_label(cpu_available, gpu_available):
+    """Title prefix for the Power panel.
+
+    When one component's energy counter stops reporting (macOS 27 freezes the
+    CPU channel without root), the combined figure is only the other half and
+    the title must say so instead of calling it the package power.
+    """
+    if cpu_available and gpu_available:
+        return "Power"
+    if gpu_available:
+        return "Power (GPU only)"
+    if cpu_available:
+        return "Power (CPU only)"
+    return "Power"
 
 
 def get_process_summary(powermetrics_parse, capabilities=None):

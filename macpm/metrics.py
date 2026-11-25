@@ -6,6 +6,7 @@ are re-exported from there for backwards compatibility.
 
 from __future__ import annotations
 
+from collections import deque
 from typing import Optional
 
 ENERGY_TO_J = {
@@ -19,6 +20,10 @@ ENERGY_TO_J = {
 }
 
 ENERGY_GRACE_SAMPLES = 3
+# Availability looks at this many recent samples so a counter that stops
+# updating (macOS 27 freezes the CPU/ANE Energy Model channels without root)
+# falls back to ``n/a`` instead of reporting a permanent 0 W.
+ENERGY_WINDOW_SAMPLES = 10
 
 
 def calc_freq(states: list, freqs: list) -> tuple[float, float]:
@@ -89,14 +94,43 @@ def energy_to_joules(value: int, unit: str) -> float:
     return max(0.0, float(value)) * ENERGY_TO_J.get((unit or "").strip().lower(), 1e-3)
 
 
-def energy_available(seen: bool, samples: int) -> bool:
-    """Whether a component's energy counter is reporting anything.
+def energy_available(seen: bool) -> bool:
+    """Whether a component's energy counter reported a non-zero delta.
 
-    A counter that has never produced a non-zero delta after a few frames is
-    treated as unreadable, so the UI can show ``n/a`` instead of a
-    misleading 0 W.
+    A counter that has never produced a usable reading — or stopped doing so,
+    which is what macOS 27 does to the CPU channel without root — must be
+    shown as unavailable rather than as a plausible 0 W.
     """
-    return seen or samples <= ENERGY_GRACE_SAMPLES
+    return bool(seen)
+
+
+def energy_warming(samples: int) -> bool:
+    """The first frames of a session, before a counter has had a chance."""
+    return samples <= ENERGY_GRACE_SAMPLES
+
+
+class EnergyTracker:
+    """Recent-sample availability for one energy counter.
+
+    ``available`` is true while the last ``ENERGY_WINDOW_SAMPLES`` deltas
+    contained a non-zero reading, so a counter that reports once and then
+    freezes stops being trusted; ``warming`` covers the first frames, before
+    any reading has had a chance to arrive.
+    """
+
+    def __init__(self, window: int = ENERGY_WINDOW_SAMPLES) -> None:
+        self._recent: deque = deque(maxlen=max(1, int(window)))
+        self.samples = 0
+
+    def add(self, joules: float) -> None:
+        self.samples += 1
+        self._recent.append(joules > 0.0)
+
+    def available(self) -> bool:
+        return any(self._recent)
+
+    def warming(self) -> bool:
+        return self.samples <= ENERGY_GRACE_SAMPLES
 
 
 def sane_energy(joules: float, elapsed: float, max_power: float) -> float:
