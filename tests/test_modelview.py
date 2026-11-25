@@ -182,6 +182,27 @@ class RenderTests(unittest.TestCase):
             view.display(parse, types.SimpleNamespace(interval=1), None)
         output = buffer.getvalue()
 
+        # 72 columns keeps the two-column, six-card layout.
+        for title in ("Speed", "GPU load", "VRAM", "GPU temp", "Power", "Context"):
+            self.assertIn(title, output)
+        self.assertNotIn("Disk", output)
+
+    def test_wide_terminal_shows_all_eight_cards(self):
+        parse = {"processor": {"clusters": [{"name": "E-Cluster", "idle_ratio": 0.5}],
+                               "gpu_energy": 20000.0, "combined_power": 20000.0},
+                 "gpu": {"idle_ratio": 0.25, "name": "Apple M3 Max",
+                         "mem_used_mb": 8192, "mem_total_mb": 36864},
+                 "disk": {"rbytes_per_s": 1024 ** 2, "wbytes_per_s": 1024}}
+        view = ModelView(registry=FakeRegistry([vllm()]), feed=FakeFeed(),
+                         no_color=True, gpu_source=lambda: [])
+        view.prime()
+        os.environ["COLUMNS"] = "110"
+        os.environ["LINES"] = "34"
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            view.display(parse, types.SimpleNamespace(interval=1), None)
+        output = buffer.getvalue()
+
         for title in ("Speed", "GPU load", "VRAM", "GPU temp",
                       "Power", "Context", "CPU", "Disk"):
             self.assertIn(title, output)
