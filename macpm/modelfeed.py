@@ -19,7 +19,7 @@ from typing import Callable, Optional
 
 from .modellog import (
     DEFAULT_SPLASH_LOG, CommandTail, HttpTail, JsonLogTail, LogTail,
-    SplashLogReader, docker_log_path,
+    SplashLogReader, docker_log_path, find_pod_log, kube_log_url,
     parse_vllm_stats,
 )
 from .serviceregistry import Service
@@ -439,6 +439,19 @@ class ModelFeed:
         url = os.environ.get(prefix + "_LOG_URL")
         if url:
             return HttpTail(url)
+        pod = os.environ.get(prefix + "_POD")
+        if pod:
+            node_log = find_pod_log(pod)
+            if node_log:
+                return LogTail(node_log)
+        kube_pod = os.environ.get(prefix + "_K8S_POD")
+        if kube_pod:
+            url, headers = kube_log_url(
+                kube_pod,
+                os.environ.get(prefix + "_K8S_NAMESPACE", "default"),
+            )
+            if url:
+                return HttpTail(url, headers=headers)
         path = os.environ.get(prefix + "_LOG")
         if path:
             return LogTail(path)

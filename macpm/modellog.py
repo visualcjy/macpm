@@ -144,16 +144,18 @@ class CommandTail:
 
 
 class HttpTail:
-    """Tail a plain-text log endpoint (oMLX ``/admin/api/logs``)."""
+    """Tail a plain-text log endpoint (oMLX, or the k8s API)."""
 
-    def __init__(self, url: str, timeout: float = 3.0):
+    def __init__(self, url: str, timeout: float = 3.0, headers=None):
         self.url = url
         self.timeout = timeout
+        self.headers = dict(headers or {})
         self._seen: deque = deque(maxlen=500)
 
     def read(self) -> list:
         try:
-            with urllib.request.urlopen(self.url, timeout=self.timeout) as response:
+            request = urllib.request.Request(self.url, headers=self.headers)
+            with urllib.request.urlopen(request, timeout=self.timeout) as response:
                 text = response.read(1 << 20).decode("utf-8", "replace")
         except (OSError, ValueError):
             return []
@@ -254,3 +256,72 @@ def docker_containers(runner=None) -> list:
             seen.add(key)
             rows.append((key[0], key[1], name, image))
     return rows
+
+
+def kubeconfig_credentials(path: str = ""):
+    """``(server, token)`` from a kubeconfig subset, or ``("", "")``.
+
+    Only ``server:`` and ``token:`` are read; client certificates are not
+    supported here (export the token instead).
+    """
+    candidates = [path] if path else [
+        os.environ.get("KUBECONFIG", ""),
+        os.path.expanduser("~/.kube/config"),
+    ]
+    for candidate in candidates:
+        if not candidate:
+            continue
+        try:
+            with open(candidate, "r", encoding="utf-8") as handle:
+                text = handle.read()
+        except OSError:
+            continue
+        server = token = ""
+        for line in text.splitlines():
+            stripped = line.strip()
+            if not server and stripped.startswith("server:"):
+                server = stripped.split("server:", 1)[1].strip()
+            elif not token and stripped.startswith("token:"):
+                token = stripped.split("token:", 1)[1].strip()
+        if server:
+            return server, token
+    return "", ""
+
+
+def kube_log_url(pod: str, namespace: str = "default", tail: int = 200,
+                 kubeconfig: str = ""):
+    """``(url, headers)`` for the pods/log API, or ``(None, {})``."""
+    server = os.environ.get("K8S_APISERVER", "").rstrip("/")
+    token = os.environ.get("K8S_TOKEN", "")
+    if not server:
+        server, file_token = kubeconfig_credentials(kubeconfig)
+        token = token or file_token
+    if not server:
+        return None, {}
+    url = ("{}/api/v1/namespaces/{}/pods/{}/log?tailLines={}"
+           .format(server, namespace, pod, tail))
+    headers = {"Authorization": "Bearer " + token} if token else {}
+    return url, headers
+
+
+def find_pod_log(pod_prefix: str, root: str = "/var/log/pods") -> str:
+    """Newest ``0.log`` of a pod, from the node's kubelet directory."""
+    best = ""
+    best_time = -1.0
+    try:
+        entries = os.listdir(root)
+    except OSError:
+        return ""
+    for entry in entries:
+        if pod_prefix not in entry:
+            continue
+        base = os.path.join(root, entry)
+        for container in os.listdir(base) if os.path.isdir(base) else []:
+            candidate = os.path.join(base, container, "0.log")
+            try:
+                mtime = os.path.getmtime(candidate)
+            except OSError:
+                continue
+            if mtime > best_time:
+                best, best_time = candidate, mtime
+    return best
