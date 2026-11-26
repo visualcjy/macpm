@@ -266,7 +266,16 @@ class ServiceRegistry:
                 return
 
     def _scan(self) -> list:
-        groups: dict = {}
+        """One service per network namespace; the API names it, the GPU table
+        attributes its cards, and processes only prove it exists."""
+        entries: dict = {}
+
+        def entry(key: str) -> dict:
+            return entries.setdefault(key, {
+                "pids": set(), "backend": "", "model": "", "port": 0,
+                "gpu": False,
+            })
+
         try:
             rows = self._process_source() or []
         except Exception as error:  # psutil can fail on a locked-down host
@@ -279,103 +288,98 @@ class ServiceRegistry:
             backend = identify(argv)
             if backend is None:
                 continue
-            port = parse_port(argv, backend)
-            host = _flag(argv, "--host") or LOCAL_HOST
-            if host in ("0.0.0.0", "::", ""):
-                host = LOCAL_HOST
-            key = ("pod", _pod_key(pid), backend.key)
-            service = groups.get(key)
-            model = parse_model(argv, backend)
-            if service is None:
-                groups[key] = Service(
-                    backend=backend.key,
-                    family=backend.family,
-                    host=host,
-                    port=port,
-                    model=model,
-                    pids=(pid,),
-                )
-            else:
-                service.pids = tuple(sorted(set(service.pids) | {pid}))
-                if service.model == "-" and model != "-":
-                    service.model = model
+            item = entry(_pod_key(pid))
+            item["pids"].add(pid)
+            item["backend"] = item["backend"] or backend.key
+            item["model"] = item["model"] or parse_model(argv, backend)
+            item["port"] = item["port"] or parse_port(argv, backend)
 
-        try:
-            containers = (self._container_source() if self._container_source
-                          else [])
-        except Exception:
-            containers = []
-        for backend, port, _name, _image in containers or []:
-            key = (backend, int(port))
-            groups.setdefault(
-                key,
-                Service(
-                    backend=backend,
-                    family=_BY_KEY.get(backend, Backend(backend, backend, "openai", 0)).family,
-                    host=LOCAL_HOST,
-                    port=int(port),
-                    model="-",
-                    source="container",
-                ),
+        for service in gpu_services(self._gpu_source):
+            pid = service.pids[0] if service.pids else 0
+            if not pid:
+                continue
+            item = entry(_pod_key(pid))
+            item["gpu"] = True
+            item["pids"].update(service.pids)
+            item["model"] = item["model"] or service.model
+            item["backend"] = item["backend"] or service.backend
+
+        services = []
+        for key, item in entries.items():
+            backend = _BY_KEY.get(item["backend"] or "manual",
+                                  _BY_KEY["manual"])
+            service = Service(
+                backend=backend.key,
+                family=backend.family,
+                host=LOCAL_HOST,
+                port=0,
+                model=item["model"] or "-",
+                pids=tuple(sorted(item["pids"])),
+                source="gpu" if item["gpu"] else "process",
             )
+            if item["port"]:
+                service.port = item["port"]
+            self._fill_endpoint(service)
+            if not service.port and not item["gpu"]:
+                continue                      # nothing to poll, nothing to prove
+            if not service.port and item["gpu"]:
+                service.port = 0              # listed with "?" until resolved
+            services.append(service)
+
+        for backend, port, _name, _image in self._containers():
+            services.append(Service(
+                backend=backend,
+                family=_BY_KEY.get(backend, _BY_KEY["manual"]).family,
+                host=LOCAL_HOST,
+                port=int(port),
+                model="-",
+                source="container",
+            ))
 
         for raw in self._manual:
             parsed = parse_endpoint(raw)
             if parsed is None:
                 continue
             host, port = parsed
-            key = ("manual", port)
-            groups.setdefault(
-                key,
-                Service(
-                    backend="manual",
-                    family="openai",
-                    host=host,
-                    port=port,
-                    model="-",
-                    source="manual",
-                ),
-            )
+            services.append(Service(
+                backend="manual", family=_BY_KEY["manual"].family,
+                host=host, port=port, model="-", source="manual",
+            ))
 
-        for service in gpu_services(self._gpu_source):
-            if not service.port:
-                self._fill_endpoint(service)
-            key = (("pod", _pod_key(service.pids[0]), service.backend)
-                   if service.pids else (service.backend, service.model))
-            groups.setdefault(key, service)
-
-        if self.validate_api:
-            groups = {
-                key: service
-                for key, service in groups.items()
-                if service.source == "gpu" or not service.port
-                or self._api_probe(service.host, service.port)
-            }
-
-        # One pod can contribute several PIDs (a launcher and its helper); once
-        # the endpoint is known they are the same service.
         merged = {}
-        for service in groups.values():
+        for service in services:
             key = ((service.backend, service.host, service.port) if service.port
-                   else (service.backend, service.model, service.pids))
+                   else ("gpu", service.model, service.pids))
             existing = merged.get(key)
             if existing is None:
                 merged[key] = service
             else:
                 existing.pids = tuple(sorted(set(existing.pids) | set(service.pids)))
-        groups = merged
 
-        services = [
-            service
-            for service in groups.values()
-            # A published container port we cannot attribute to a model or a
-            # card is noise (databases, proxies): keep only known services and
-            # the endpoints the user added by hand.
+        merged = {
+            key: service for key, service in merged.items()
+            # A published container port that maps to no known backend is noise.
             if not (service.source == "container" and service.backend == "manual")
+            # A port that is not listening proves nothing.
             and (not service.port or self._prober(service.host, service.port))
-        ]
-        services.sort(key=lambda service: (service.backend, service.port))
-        return services
+        }
+        if self.validate_api:
+            merged = {
+                key: service for key, service in merged.items()
+                if service.source == "gpu" or not service.port
+                or self._api_probe(service.host, service.port)
+            }
+
+        result = list(merged.values())
+        result.sort(key=lambda service: (service.backend, service.port))
+        return result
+
+    def _containers(self) -> list:
+        try:
+            return (self._container_source() if self._container_source
+                    else []) or []
+        except Exception:
+            return []
 
 
 def _pod_key(pid: int) -> str:
