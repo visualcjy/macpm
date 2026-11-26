@@ -3,6 +3,24 @@
 ## Unreleased
 
 ### Added
+- Model view discovery is now organised around **network namespaces**: one
+  service per container/pod, with the launcher and its tensor-parallel workers
+  merged, while two servers of the same model on different cards stay two rows.
+  Candidates come from the process table, the vendor GPU table (pid → cards and
+  memory, no HTTP needed) and published container ports; `sudo -E macpm` also
+  resolves endpoints inside container namespaces via `/proc/<pid>/net/tcp`.
+  The model name and backend come from `GET /v1/models` (`id` and `owned_by`).
+- Model view **log sources**: the Splash reader is joined by a generic file
+  tail, a re-run-and-dedupe command tail (`docker logs`), a Docker json-log
+  reader, the kubelet `/var/log/pods/.../0.log` lookup, the Kubernetes log API
+  (no kubectl on the node) and a plain HTTP log endpoint, chosen per backend
+  with `<PREFIX>_LOG`, `_LOG_CMD`, `_DOCKER`, `_POD`, `_K8S_POD` or `_LOG_URL`.
+- Model view **multi-GPU numbers**: GPU load, VRAM, temperature and power are
+  aggregated over the cards the selected service holds (subtitle `2x NV RTX
+  4090`); card names keep the brand and drop the marketing series; STATE is
+  refreshed for every row by a five-second `/v1/models` probe.
+- A Chinese README (`README.zh-CN.md`) with a language switcher in both files.
+
 
 - Model view (key `6`): lists the local model servers found in the process
   table — vLLM, SGLang, llama.cpp, ollama, oMLX and Splash — with the model
