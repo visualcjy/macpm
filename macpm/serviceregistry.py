@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 import socket
+import subprocess
 import time
 from dataclasses import dataclass, field
 from typing import Callable, Iterable, Optional
@@ -234,6 +235,19 @@ class ServiceRegistry:
 
     # -- internals ---------------------------------------------------------
 
+    def _fill_endpoint(self, service) -> None:
+        """Give a GPU-discovered service a real endpoint when we can see one."""
+        for pid in service.pids:
+            for ip, port in netns_listeners(pid):
+                host = "127.0.0.1" if ip == "0.0.0.0" else ip
+                if ip == "0.0.0.0":
+                    address = netns_address(pid)
+                    if address:
+                        host = address
+                if self._prober(host, port):
+                    service.host, service.port = host, port
+                    return
+
     def _scan(self) -> list:
         groups: dict = {}
         try:
@@ -307,6 +321,8 @@ class ServiceRegistry:
             )
 
         for service in gpu_services(self._gpu_source):
+            if not service.port:
+                self._fill_endpoint(service)
             key = (service.backend, service.port) if service.port else (
                 service.backend, service.model)
             groups.setdefault(key, service)
@@ -361,3 +377,51 @@ def gpu_services(gpu_source=None) -> list:
         elif pid:
             service.pids = tuple(sorted(set(service.pids) | {pid}))
     return list(found.values())
+
+
+PROC = "/proc"
+
+
+def netns_listeners(pid: int, proc_root: str = PROC) -> list:
+    """Listening ``(ip, port)`` pairs inside one process' network namespace.
+
+    ``/proc/<pid>/net/tcp`` is that namespace's table, so a containerised
+    server is visible here even though the host's ``ss`` never lists it.
+    """
+    pairs = []
+    try:
+        with open(os.path.join(proc_root, str(pid), "net", "tcp"),
+                  "r", encoding="ascii", errors="replace") as handle:
+            lines = handle.read().splitlines()
+    except OSError:
+        return []
+    for line in lines[1:]:
+        fields = line.split()
+        if len(fields) < 4 or fields[3] != "0A":     # 0A = LISTEN
+            continue
+        try:
+            address, port = fields[1].split(":")
+            ip = socket.inet_ntoa(bytes.fromhex(address)[::-1])
+            pairs.append((ip, int(port, 16)))
+        except (ValueError, OSError):
+            continue
+    return pairs
+
+
+def netns_address(pid: int) -> str:
+    """First non-loopback IPv4 address of a process' namespace (root only)."""
+    try:
+        result = subprocess.run(
+            ["nsenter", "-t", str(pid), "-n", "ip", "-4", "-o", "addr", "show"],
+            capture_output=True, text=True, timeout=3,
+            stdin=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    for line in (result.stdout or "").splitlines():
+        parts = line.split()
+        if "inet" in parts:
+            address = parts[parts.index("inet") + 1].split("/")[0]
+            if not address.startswith("127."):
+                return address
+    return ""
