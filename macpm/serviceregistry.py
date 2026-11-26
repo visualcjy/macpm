@@ -334,8 +334,8 @@ class ServiceRegistry:
         for service in gpu_services(self._gpu_source):
             if not service.port:
                 self._fill_endpoint(service)
-            key = (service.backend, service.port) if service.port else (
-                service.backend, service.model)
+            key = ((service.backend, service.port) if service.port
+                   else (service.backend, service.model, service.pids))
             groups.setdefault(key, service)
 
         services = [
