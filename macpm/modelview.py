@@ -615,7 +615,26 @@ class ModelView:
         cpu_w = (processor.get("cpu_energy") or 0.0) / 1000.0 / interval
         gpu_w = (processor.get("gpu_energy") or 0.0) / 1000.0 / interval
         total_w = (processor.get("combined_power") or 0.0) / 1000.0 / interval
+        cards = gpu.get("cards") or []
         temp = getattr(sensors, "gpu_c", None) if sensors is not None else None
+        if cards:
+            temps = [c.get("temp_c") for c in cards if c.get("temp_c")]
+            if temps:
+                temp = max(temps)
+            used = sum(c.get("mem_used_mb") or 0.0 for c in cards)
+            total = sum(c.get("mem_total_mb") or 0.0 for c in cards)
+            if used and total:
+                gpu["mem_used_mb"], gpu["mem_total_mb"] = used, total
+            watts = [c.get("power_w") for c in cards if c.get("power_w")]
+            if watts:
+                gpu_w = sum(watts)
+                total_w = gpu_w
+            busy = [c.get("busy_pct") for c in cards if c.get("busy_pct") is not None]
+            if busy:
+                gpu_pct = sum(busy) / len(busy)
+            names = {(c.get("name") or "").strip() for c in cards if c.get("name")}
+            if len(cards) > 1 and names:
+                gpu["name"] = "{}x {}".format(len(cards), sorted(names)[0])
         speed = None if stats is None else (stats.decode_observed
                                          if stats.decode_observed is not None else stats.decode_tps)
         read = disk.get("rbytes_per_s")
