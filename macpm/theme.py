@@ -83,7 +83,7 @@ _UNIT = re.compile(
 )
 _RATE_UNIT = re.compile(r"^(?:[kMGT]?B/s|Bytes/s)$")
 _HINT = re.compile(
-    r"Ctrl\+R|←/→|↑/↓|1-5|\bq\b|\bs\b|\ba\b|\bp\b|\?|Space|Tab|Esc|Enter"
+    r"Ctrl\+R|←/→|↑/↓|\d-\d|\bq\b|\bs\b|\br\b|\ba\b|\bp\b|\?|Space|Tab|Esc|Enter"
 )
 
 # Words that are labels, not values; they stay dim inside a title too.

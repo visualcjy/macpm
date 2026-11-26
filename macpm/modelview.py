@@ -423,7 +423,7 @@ class ModelView:
         if vram:
             text += " " + _pad("VRAM", vram, right=True)
         text += " " + _pad("STATE", _STATE_WIDTH, right=True)
-        return _fit(text, inner)
+        return (_fit(text, inner), KEY)
 
     def _row_line(self, service: Service, selected: bool, inner: int,
                   stats: Optional[ModelStats]) -> tuple:
@@ -522,7 +522,12 @@ class ModelView:
             lines += extra
         lines = self._pair(lines)
         for row in recent:
-            lines.append([(_fit(row, inner), MUTED)])
+            if isinstance(row, tuple):
+                label, label_role, value, value_role = row
+                lines.append([(label, label_role), (_fit(value, inner - len(label)),
+                                                    value_role)])
+            else:
+                lines.append([(_fit(str(row), inner), MUTED)])
         if stats is not None and stats.note:
             lines.append(field("note", stats.note, HINT))
         return lines
@@ -631,8 +636,9 @@ class ModelView:
                 _ttft(row.first_ms) if row.first_ms is not None else "--")
             text += "  cached {}".format(
                 _tokens(row.cached) if row.cached else "--")
-            recent_rows.append(
-                ("recent    " if index == 0 else " " * 10) + text)
+            recent_rows.append((
+                ("recent    " if index == 0 else " " * 10), KEY,
+                text, MUTED))
         return lines, recent_rows
 
     # -- wide eight-card grid (form C) -------------------------------------
