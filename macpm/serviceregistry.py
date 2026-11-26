@@ -237,8 +237,19 @@ class ServiceRegistry:
 
     def _fill_endpoint(self, service) -> None:
         """Give a GPU-discovered service a real endpoint when we can see one."""
+        preferred = {8000, 8001, 8002, 8010, 8080, 9931, 11434, 30000, 30001}
         for pid in service.pids:
-            for ip, port in netns_listeners(pid):
+            listeners = netns_listeners(pid)
+            # Ephemeral client sockets also sit in LISTEN (bound but not
+            # accepted); prefer the service ports, then the lowest non-ephemeral
+            # one, and ignore the rest.
+            candidates = [entry for entry in listeners if entry[1] in preferred]
+            if not candidates:
+                candidates = sorted(
+                    (entry for entry in listeners if entry[1] < 32768),
+                    key=lambda entry: entry[1],
+                )
+            for ip, port in candidates:
                 host = "127.0.0.1" if ip == "0.0.0.0" else ip
                 if ip == "0.0.0.0":
                     address = netns_address(pid)
