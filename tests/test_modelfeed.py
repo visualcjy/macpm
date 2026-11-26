@@ -297,6 +297,17 @@ class MockServerTests(unittest.TestCase):
         self.assertEqual(stats.active, 5)
         self.assertEqual(stats.kv_pct, 78.0)
 
+    def test_vllm_without_metrics_still_reports_the_model(self):
+        MockHandler.routes = {"/metrics": ({"error": "not found"}, 404),
+                              "/v1/models": ({"data": [{"id": "Qwen3-Embedding-8B",
+                                                        "max_model_len": 8192}]}, 200)}
+        stats = fetch_stats(self.service("vllm"))
+
+        self.assertEqual(stats.state, "live")
+        self.assertEqual(stats.model, "Qwen3-Embedding-8B")
+        self.assertEqual(stats.ctx_total, 8192)
+        self.assertIn("metrics endpoint unavailable", stats.note)
+
     def test_sglang_metrics_and_server_info(self):
         MockHandler.routes = {
             "/metrics": (SGLANG_METRICS, 200),

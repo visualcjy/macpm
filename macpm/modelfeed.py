@@ -648,17 +648,31 @@ def _model_info(host: str, port: int, key: str) -> dict:
 
 
 def _fetch_vllm(service: Service, key: str) -> ModelStats:
-    metrics = parse_prometheus(
-        _http_text(service.host, service.port, "/metrics", key))
     info = _model_info(service.host, service.port, key)
+    try:
+        metrics = parse_prometheus(
+            _http_text(service.host, service.port, "/metrics", key))
+    except urllib.error.HTTPError as error:
+        if error.code not in (404, 501):
+            raise
+        # Some deployments serve the API without the metrics endpoint.
+        stats = ModelStats(state="live", model=str(info.get("id") or ""))
+        stats.ctx_total = _int(info.get("max_model_len"))
+        stats.note = "metrics endpoint unavailable · showing the model only"
+        return stats
     stats = parse_vllm(metrics, str(info.get("id") or ""))
     stats.ctx_total = _int(info.get("max_model_len"))
     return stats
 
 
 def _fetch_sglang(service: Service, key: str) -> ModelStats:
-    metrics = parse_prometheus(
-        _http_text(service.host, service.port, "/metrics", key))
+    try:
+        metrics = parse_prometheus(
+            _http_text(service.host, service.port, "/metrics", key))
+    except urllib.error.HTTPError as error:
+        if error.code not in (404, 501):
+            raise
+        metrics = {}
     try:
         info = _http_json(service.host, service.port, "/get_server_info", key)
     except Exception:
