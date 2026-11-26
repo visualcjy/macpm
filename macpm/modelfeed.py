@@ -658,7 +658,8 @@ def _fetch_vllm(service: Service, key: str) -> ModelStats:
         # Some deployments serve the API without the metrics endpoint.
         stats = ModelStats(state="live", model=str(info.get("id") or ""))
         stats.ctx_total = _int(info.get("max_model_len"))
-        stats.note = "metrics endpoint unavailable · showing the model only"
+        stats.note = ("API not found at / · showing the process only" if not info
+                      else "metrics endpoint unavailable · showing the model only")
         return stats
     stats = parse_vllm(metrics, str(info.get("id") or ""))
     stats.ctx_total = _int(info.get("max_model_len"))
