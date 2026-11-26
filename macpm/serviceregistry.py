@@ -72,8 +72,8 @@ class Service:
 
     @property
     def identity(self) -> tuple:
-        """Stable across polls and process restarts, unlike ``pid``."""
-        return (self.backend, self.port)
+        """Stable across polls: the port may still be 0 before resolution."""
+        return (self.backend, self.model, self.port)
 
 
 def _argv0(argv: Iterable[str]) -> str:
@@ -245,7 +245,13 @@ class ServiceRegistry:
         cache_key = (service.backend, service.model, service.pids)
         cached = self._endpoints.get(cache_key)
         if cached:
-            service.host, service.port = cached
+            host, port, model, backend = cached
+            service.host, service.port = host, port
+            if model:
+                service.model = model
+            if backend:
+                service.backend = backend
+                service.family = _BY_KEY[backend].family
             return
         for pid in service.pids:
             for ip, port in _candidate_ports(pid):
@@ -262,7 +268,7 @@ class ServiceRegistry:
                 if backend:
                     service.backend = backend
                     service.family = _BY_KEY[backend].family
-                self._endpoints[cache_key] = (host, port)
+                self._endpoints[cache_key] = (host, port, identity, service.backend)
                 return
 
     def _scan(self) -> list:

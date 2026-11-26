@@ -46,8 +46,8 @@ def _service_sort_key(sort: str):
     if sort == "model":
         return lambda service: (service.model.lower(), service.port)
     if sort == "backend":
-        return lambda service: (service.backend, service.port)
-    return lambda service: (service.port, service.backend)
+        return lambda service: (service.backend, service.model.lower(), service.port)
+    return lambda service: (service.port, service.backend, service.model.lower())
 
 
 def _value_spans(text: str, base: str = LABEL) -> list:
