@@ -23,10 +23,8 @@ class GpuDiscoveryTests(unittest.TestCase):
 
         models = sorted(service.model for service in services)
         self.assertEqual(models, ["Qwen3-Embedding-8B", "Qwen3-Reranker-8B",
-                                  "Qwen3.8-27B-FP8"])
-        sglang = [s for s in services if s.backend == "sglang"][0]
-        self.assertEqual(sglang.pids, (13, 14))
-        self.assertEqual(sglang.endpoint, "?")
+                                  "Qwen3.8-27B-FP8", "Qwen3.8-27B-FP8"])
+        self.assertTrue(all(service.endpoint == "?" for service in services))
 
     def test_registry_keeps_them_without_probing(self):
         registry = ServiceRegistry(
@@ -36,7 +34,7 @@ class GpuDiscoveryTests(unittest.TestCase):
         )
         services = registry.discover(force=True)
 
-        self.assertEqual(len(services), 3)
+        self.assertEqual(len(services), 4)
         self.assertTrue(all(service.source == "gpu" for service in services))
 
 

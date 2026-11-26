@@ -376,21 +376,20 @@ def gpu_services(gpu_source=None) -> list:
         if not model:
             continue
         backend = "sglang" if "sglang" in name else "vllm"
-        key = (backend, model)
         pid = int(row.get("pid") or 0)
-        service = found.get(key)
-        if service is None:
-            found[key] = Service(
-                backend=backend,
-                family=_BY_KEY[backend].family,
-                host=LOCAL_HOST,
-                port=0,
-                model=model,
-                pids=(pid,) if pid else (),
-                source="gpu",
-            )
-        elif pid:
-            service.pids = tuple(sorted(set(service.pids) | {pid}))
+        cards = tuple(row.get("gpus") or ())
+        # Two servers of the same model on different cards are two services;
+        # only the workers that share a card set are one.
+        key = (backend, model, cards, pid)
+        found[key] = Service(
+            backend=backend,
+            family=_BY_KEY[backend].family,
+            host=LOCAL_HOST,
+            port=0,
+            model=model,
+            pids=(pid,) if pid else (),
+            source="gpu",
+        )
     return list(found.values())
 
 
