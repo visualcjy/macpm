@@ -206,6 +206,7 @@ class ModelView:
         self._last_scan = now
         self._replace(self.registry.discover())
         self.feed.maybe_refresh()
+        self.feed.probe_states(self.services)
 
     def toggle_pause(self) -> None:
         self.paused = not self.paused
@@ -416,7 +417,8 @@ class ModelView:
         if vram:
             usage = self._service_gpu(service)
             text += " " + _pad(_gib(usage[1]) if usage else "-", vram, right=True)
-        state = self._state_text(stats) if selected else "unverified"
+        state = (self._state_text(stats) if selected
+                 else (self.feed.state(service) or "unverified"))
         text += " " + _pad(state, _STATE_WIDTH, right=True)
         return (_fit(text, inner), TITLE if selected else LABEL)
 

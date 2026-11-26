@@ -41,6 +41,12 @@ class FakeFeed:
     def recent(self):
         return list(getattr(self, "recent_rows", []))
 
+    def probe_states(self, services):
+        pass
+
+    def state(self, service):
+        return ""
+
 
 class FakeRegistry:
     def __init__(self, services):

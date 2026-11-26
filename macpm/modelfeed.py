@@ -22,7 +22,7 @@ from .modellog import (
     SplashLogReader, docker_log_path, find_pod_log, kube_log_url,
     parse_vllm_stats,
 )
-from .serviceregistry import Service
+from .serviceregistry import Service, _api_identity
 
 TIMEOUT = 1.5
 MAX_BYTES = 1 << 20          # 1 MiB, the same cap netinfo uses
@@ -393,6 +393,8 @@ class ModelFeed:
         self._counters: dict = {}
         self._decode_state: dict = {}
         self._logs: dict = {}
+        self._states: dict = {}
+        self._states_at = -1e9
 
     # -- selection ---------------------------------------------------------
 
@@ -410,6 +412,25 @@ class ModelFeed:
             self._counters = {}
             self._decode_state = {}
             self._logs = {}
+
+    def probe_states(self, services, ttl: float = 5.0) -> None:
+        """Cheap ``/v1/models`` probe for every row, so STATE is not blank."""
+        now = self.clock()
+        if now - self._states_at < ttl:
+            return
+        self._states_at = now
+        items = [s for s in services if s.port]
+
+        def run() -> None:
+            for service in items:
+                alive, _identity, _owner = _api_identity(service.host, service.port,
+                                                         timeout=0.9)
+                self._states[service.identity] = "live" if alive else "offline"
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def state(self, service) -> str:
+        return self._states.get(service.identity, "")
 
     def snapshot(self) -> Optional[ModelStats]:
         with self._lock:
