@@ -36,7 +36,7 @@ class NetnsTests(unittest.TestCase):
         original_ports = module._candidate_ports
         original_identity = module._api_identity
         module._candidate_ports = lambda pid: [("172.0.0.81", 30000)]
-        module._api_identity = lambda host, port: (True, "Qwen3.8-27B-FP8")
+        module._api_identity = lambda host, port: (True, "Qwen3.8-27B-FP8", "sglang")
         try:
             registry = ServiceRegistry(process_source=lambda: [],
                                        prober=lambda host, port: True)
@@ -48,6 +48,7 @@ class NetnsTests(unittest.TestCase):
             module._api_identity = original_identity
 
         self.assertEqual((service.host, service.port), ("172.0.0.81", 30000))
+        self.assertEqual(service.backend, "sglang")     # owned_by wins
 
 if __name__ == "__main__":
     unittest.main()

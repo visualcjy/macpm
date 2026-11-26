@@ -250,14 +250,18 @@ class ServiceRegistry:
         for pid in service.pids:
             for ip, port in _candidate_ports(pid):
                 host = ip if ip != "0.0.0.0" else (netns_address(pid) or LOCAL_HOST)
-                alive, identity = _api_identity(host, port)
+                alive, identity, owner = _api_identity(host, port)
                 if not alive:
                     continue
-                if not _same_model(service.model, identity):
-                    continue
+                # The API is the only authority for model and backend; the
+                # GPU table only supplies pids, cards and memory.
                 service.host, service.port = host, port
                 if identity:
                     service.model = identity
+                backend = _OWNER_BACKEND.get((owner or "").lower())
+                if backend:
+                    service.backend = backend
+                    service.family = _BY_KEY[backend].family
                 self._endpoints[cache_key] = (host, port)
                 return
 
@@ -348,6 +352,19 @@ class ServiceRegistry:
                 or self._api_probe(service.host, service.port)
             }
 
+        # One pod can contribute several PIDs (a launcher and its helper); once
+        # the endpoint is known they are the same service.
+        merged = {}
+        for service in groups.values():
+            key = ((service.backend, service.host, service.port) if service.port
+                   else (service.backend, service.model, service.pids))
+            existing = merged.get(key)
+            if existing is None:
+                merged[key] = service
+            else:
+                existing.pids = tuple(sorted(set(existing.pids) | set(service.pids)))
+        groups = merged
+
         services = [
             service
             for service in groups.values()
@@ -380,8 +397,15 @@ def _candidate_ports(pid: int):
     return ordered
 
 
+_OWNER_BACKEND = {
+    "vllm": "vllm", "sglang": "sglang", "llamacpp": "llama.cpp",
+    "llama.cpp": "llama.cpp", "ollama": "ollama", "omlx": "omlx",
+    "splash": "splash",
+}
+
+
 def _api_identity(host: str, port: int, timeout: float = 1.2):
-    """``(alive, model_id)`` for an OpenAI-style endpoint."""
+    """``(alive, model_id, owned_by)`` for an OpenAI-style endpoint."""
     import urllib.error
     import urllib.request
 
@@ -392,11 +416,14 @@ def _api_identity(host: str, port: int, timeout: float = 1.2):
 
             payload = json.loads(response.read(1 << 20).decode("utf-8", "replace"))
     except urllib.error.HTTPError as error:
-        return error.code in (401, 403), ""
+        return error.code in (401, 403), "", ""
     except (OSError, ValueError):
-        return False, ""
+        return False, "", ""
     data = payload.get("data") or []
-    return True, str(data[0].get("id") or "") if data else ""
+    if not data:
+        return True, "", ""
+    first = data[0]
+    return True, str(first.get("id") or ""), str(first.get("owned_by") or "")
 
 
 def _same_model(left: str, right: str) -> bool:
