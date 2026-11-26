@@ -35,6 +35,15 @@ class DockerDiscoveryTests(unittest.TestCase):
         self.assertIn(("sglang", 30000, "sglang-box", "sglang/srt:latest"), rows)
         self.assertEqual(len(rows), 2)      # the internal-only port is skipped
 
+
+    def test_unknown_container_ports_are_not_listed(self):
+        registry = ServiceRegistry(
+            process_source=lambda: [],
+            prober=lambda host, port: True,
+            container_source=lambda: [("manual", 4000, "db", "postgres:16")],
+        )
+        self.assertEqual(registry.discover(force=True), [])
+
     def test_registry_merges_containers(self):
         registry = ServiceRegistry(
             process_source=lambda: [],

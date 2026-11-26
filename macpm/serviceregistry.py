@@ -330,7 +330,11 @@ class ServiceRegistry:
         services = [
             service
             for service in groups.values()
-            if not service.port or self._prober(service.host, service.port)
+            # A published container port we cannot attribute to a model or a
+            # card is noise (databases, proxies): keep only known services and
+            # the endpoints the user added by hand.
+            if not (service.source == "container" and service.backend == "manual")
+            and (not service.port or self._prober(service.host, service.port))
         ]
         services.sort(key=lambda service: (service.backend, service.port))
         return services
