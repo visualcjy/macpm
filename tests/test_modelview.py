@@ -206,6 +206,34 @@ class RenderTests(unittest.TestCase):
                       "Power", "Context", "CPU", "Disk read"):
             self.assertIn(title, output)
 
+
+    def test_multi_gpu_cards_aggregate_vram_and_temperature(self):
+        parse = {
+            "processor": {"clusters": [], "combined_power": 0},
+            "gpu": {"idle_ratio": 0.5, "name": "RTX 4090",
+                    "mem_used_mb": 1000, "mem_total_mb": 24000, "temp_c": 30},
+            "gpus": [
+                {"name": "RTX 4090", "busy_pct": 10, "mem_used_mb": 20000,
+                 "mem_total_mb": 24000, "temp_c": 61, "power_w": 100},
+                {"name": "RTX 4090", "busy_pct": 30, "mem_used_mb": 22000,
+                 "mem_total_mb": 24000, "temp_c": 65, "power_w": 120},
+            ],
+            "disk": {},
+        }
+        view = ModelView(registry=FakeRegistry([vllm()]), feed=FakeFeed(),
+                         no_color=True, gpu_source=lambda: [])
+        view.prime()
+        os.environ["COLUMNS"] = "110"
+        os.environ["LINES"] = "34"
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            view.display(parse, types.SimpleNamespace(interval=1), None)
+        output = buffer.getvalue()
+
+        self.assertIn("41.0 GB / 46.9 GB", output)
+        self.assertIn("65 C", output)
+        self.assertIn("220.00 W", output)
+
     def test_cards_and_vram_come_from_the_vendor_gpu_table(self):
         def gpu():
             return [

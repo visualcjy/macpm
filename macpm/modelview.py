@@ -621,7 +621,7 @@ class ModelView:
         cpu_w = (processor.get("cpu_energy") or 0.0) / 1000.0 / interval
         gpu_w = (processor.get("gpu_energy") or 0.0) / 1000.0 / interval
         total_w = (processor.get("combined_power") or 0.0) / 1000.0 / interval
-        cards = gpu.get("cards") or []
+        cards = (parse or {}).get("gpus") or gpu.get("cards") or []
         temp = getattr(sensors, "gpu_c", None) if sensors is not None else None
         if cards:
             temps = [c.get("temp_c") for c in cards if c.get("temp_c")]
