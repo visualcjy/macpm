@@ -241,34 +241,25 @@ class ServiceRegistry:
     # -- internals ---------------------------------------------------------
 
     def _fill_endpoint(self, service) -> None:
-        """Give a GPU-discovered service a real endpoint when we can see one."""
+        """Bind a port only when the API there reports the same model."""
         cache_key = (service.backend, service.model, service.pids)
         cached = self._endpoints.get(cache_key)
         if cached:
             service.host, service.port = cached
             return
-        preferred = {8000, 8001, 8002, 8010, 8080, 9931, 11434, 30000, 30001}
         for pid in service.pids:
-            listeners = netns_listeners(pid)
-            # Ephemeral client sockets also sit in LISTEN (bound but not
-            # accepted); prefer the service ports, then the lowest non-ephemeral
-            # one, and ignore the rest.
-            candidates = [entry for entry in listeners if entry[1] in preferred]
-            if not candidates:
-                candidates = sorted(
-                    (entry for entry in listeners if entry[1] < 32768),
-                    key=lambda entry: entry[1],
-                )
-            for ip, port in candidates:
-                host = "127.0.0.1" if ip == "0.0.0.0" else ip
-                if ip == "0.0.0.0":
-                    address = netns_address(pid)
-                    if address:
-                        host = address
-                if self._prober(host, port):
-                    service.host, service.port = host, port
-                    self._endpoints[cache_key] = (host, port)
-                    return
+            for ip, port in _candidate_ports(pid):
+                host = ip if ip != "0.0.0.0" else (netns_address(pid) or LOCAL_HOST)
+                alive, identity = _api_identity(host, port)
+                if not alive:
+                    continue
+                if not _same_model(service.model, identity):
+                    continue
+                service.host, service.port = host, port
+                if identity:
+                    service.model = identity
+                self._endpoints[cache_key] = (host, port)
+                return
 
     def _scan(self) -> list:
         groups: dict = {}
@@ -288,7 +279,7 @@ class ServiceRegistry:
             host = _flag(argv, "--host") or LOCAL_HOST
             if host in ("0.0.0.0", "::", ""):
                 host = LOCAL_HOST
-            key = (backend.key, port)
+            key = ("pod", _pod_key(pid), backend.key)
             service = groups.get(key)
             model = parse_model(argv, backend)
             if service is None:
@@ -345,8 +336,8 @@ class ServiceRegistry:
         for service in gpu_services(self._gpu_source):
             if not service.port:
                 self._fill_endpoint(service)
-            key = ((service.backend, service.port) if service.port
-                   else (service.backend, service.model, service.pids))
+            key = (("pod", _pod_key(service.pids[0]), service.backend)
+                   if service.pids else (service.backend, service.model))
             groups.setdefault(key, service)
 
         if self.validate_api:
@@ -370,13 +361,50 @@ class ServiceRegistry:
         return services
 
 
-def gpu_services(gpu_source=None) -> list:
-    """Services the GPU table already knows, even without a reachable API.
+def _pod_key(pid: int) -> str:
+    """Group processes that share a network namespace (one container = one service)."""
+    try:
+        return os.readlink("/proc/%d/ns/net" % pid)
+    except OSError:
+        return "pid:%d" % pid
 
-    The vendor table resolves each card-holding PID to its launcher's model
-    name, so a containerised or other-user server still shows up; its port
-    stays unknown (``0``) until the API can be found.
-    """
+
+def _candidate_ports(pid: int):
+    """Service ports first, then the lowest non-ephemeral ones."""
+    preferred = {8000, 8001, 8002, 8010, 8080, 9931, 11434, 30000, 30001}
+    listeners = netns_listeners(pid)
+    ordered = [entry for entry in listeners if entry[1] in preferred]
+    ordered += sorted((entry for entry in listeners if entry[1] < 32768
+                       and entry[1] not in preferred),
+                      key=lambda entry: entry[1])
+    return ordered
+
+
+def _api_identity(host: str, port: int, timeout: float = 1.2):
+    """``(alive, model_id)`` for an OpenAI-style endpoint."""
+    import urllib.error
+    import urllib.request
+
+    url = "http://{}:{}/v1/models".format(host, port)
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as response:
+            import json
+
+            payload = json.loads(response.read(1 << 20).decode("utf-8", "replace"))
+    except urllib.error.HTTPError as error:
+        return error.code in (401, 403), ""
+    except (OSError, ValueError):
+        return False, ""
+    data = payload.get("data") or []
+    return True, str(data[0].get("id") or "") if data else ""
+
+
+def _same_model(left: str, right: str) -> bool:
+    left, right = (left or "").lower(), (right or "").lower()
+    return bool(left) and bool(right) and (left == right or left.startswith(right)
+                                           or right.startswith(left))
+def gpu_services(gpu_source=None) -> list:
+    """Services the GPU table knows, one per container (network namespace)."""
     if gpu_source is None:
         try:
             from .backend import gpu_process_source
@@ -391,24 +419,25 @@ def gpu_services(gpu_source=None) -> list:
     found = {}
     for row in rows:
         model = (row.get("model") or "").strip()
-        name = (row.get("name") or "").lower()
         if not model:
             continue
+        name = (row.get("name") or "").lower()
         backend = "sglang" if "sglang" in name else "vllm"
         pid = int(row.get("pid") or 0)
-        cards = tuple(row.get("gpus") or ())
-        # Two servers of the same model on different cards are two services;
-        # only the workers that share a card set are one.
-        key = (backend, model, cards, pid)
-        found[key] = Service(
-            backend=backend,
-            family=_BY_KEY[backend].family,
-            host=LOCAL_HOST,
-            port=0,
-            model=model,
-            pids=(pid,) if pid else (),
-            source="gpu",
-        )
+        key = (_pod_key(pid), backend, model)
+        service = found.get(key)
+        if service is None:
+            found[key] = Service(
+                backend=backend,
+                family=_BY_KEY[backend].family,
+                host=LOCAL_HOST,
+                port=0,
+                model=model,
+                pids=(pid,) if pid else (),
+                source="gpu",
+            )
+        elif pid:
+            service.pids = tuple(sorted(set(service.pids) | {pid}))
     return list(found.values())
 
 

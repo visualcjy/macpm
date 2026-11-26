@@ -92,17 +92,21 @@ class RegistryTests(unittest.TestCase):
             return port in open_ports
         return ServiceRegistry(process_source=source(*rows), prober=prober)
 
-    def test_groups_workers_by_backend_and_port(self):
-        registry = self.make([
-            (10, VLLM_API),
-            (11, VLLM_API),        # a second process on the same port
-            (20, LLAMA_CPP := LLAMACPP),
-        ])
-        services = registry.discover(force=True)
-        by_key = {service.identity: service for service in services}
+    def test_workers_of_one_pod_are_one_service(self):
+        import macpm.serviceregistry as module
 
-        self.assertEqual(by_key[("vllm", 8001)].pids, (10, 11))
-        self.assertEqual(by_key[("llama.cpp", 9931)].pids, (20,))
+        original = module._pod_key
+        module._pod_key = lambda pid: "pod:a" if pid in (10, 11) else "pod:b"
+        try:
+            registry = self.make([(10, VLLM_API), (11, VLLM_API),
+                                  (20, LLAMACPP)])
+            services = registry.discover(force=True)
+        finally:
+            module._pod_key = original
+        by_key = {service.endpoint: service for service in services}
+
+        self.assertEqual(by_key["127.0.0.1:8001"].pids, (10, 11))
+        self.assertEqual(by_key["127.0.0.1:9931"].pids, (20,))
 
     def test_closed_ports_are_not_listed(self):
         registry = self.make([(10, VLLM_API)], open_ports=())

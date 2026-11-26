@@ -31,25 +31,23 @@ class NetnsTests(unittest.TestCase):
         self.assertNotIn(("127.0.0.1", 54321), pairs)   # not LISTEN
 
     def test_a_gpu_service_gets_the_endpoint(self):
-        registry = ServiceRegistry(
-            process_source=lambda: [],
-            prober=lambda host, port: port == 30000,
-            gpu_source=lambda: [],
-        )
-        service = Service("sglang", "prometheus", "127.0.0.1", 0,
-                          "Qwen3.8-27B-FP8", (42,), source="gpu")
-        registry._prober = lambda host, port: True
-        registry._fill_endpoint.__globals__["netns_listeners"] = lambda pid: [("172.0.0.81", 30000)]
+        import macpm.serviceregistry as module
+
+        original_ports = module._candidate_ports
+        original_identity = module._api_identity
+        module._candidate_ports = lambda pid: [("172.0.0.81", 30000)]
+        module._api_identity = lambda host, port: (True, "Qwen3.8-27B-FP8")
         try:
+            registry = ServiceRegistry(process_source=lambda: [],
+                                       prober=lambda host, port: True)
+            service = Service("sglang", "prometheus", "127.0.0.1", 0,
+                              "Qwen3.8-27B-FP8", (42,), source="gpu")
             registry._fill_endpoint(service)
         finally:
-            import importlib
-            import macpm.serviceregistry as module
-            importlib.reload(module)
-            registry._fill_endpoint = module.ServiceRegistry._fill_endpoint.__get__(registry)
+            module._candidate_ports = original_ports
+            module._api_identity = original_identity
 
         self.assertEqual((service.host, service.port), ("172.0.0.81", 30000))
-
 
 if __name__ == "__main__":
     unittest.main()
