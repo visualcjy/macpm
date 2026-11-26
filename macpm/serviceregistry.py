@@ -63,7 +63,7 @@ class Service:
 
     @property
     def endpoint(self) -> str:
-        return f"{self.host}:{self.port}"
+        return f"{self.host}:{self.port}" if self.port else "?"
 
     @property
     def label(self) -> str:
@@ -209,6 +209,7 @@ class ServiceRegistry:
         prober: Optional[Callable[[str, int], bool]] = None,
         manual: Iterable[str] = (),
         container_source: Optional[Callable[[], list]] = None,
+        gpu_source: Optional[Callable[[], list]] = None,
     ):
         self.clock = clock
         self.ttl = max(0.0, float(ttl))
@@ -216,6 +217,7 @@ class ServiceRegistry:
         self._prober = prober or _port_open
         self._manual = [item for item in (manual or ()) if item]
         self._container_source = container_source
+        self._gpu_source = gpu_source
         self._services: list = []
         self._cached_at = -1e9
         self.error = ""
@@ -304,10 +306,58 @@ class ServiceRegistry:
                 ),
             )
 
+        for service in gpu_services(self._gpu_source):
+            key = (service.backend, service.port) if service.port else (
+                service.backend, service.model)
+            groups.setdefault(key, service)
+
         services = [
             service
             for service in groups.values()
-            if self._prober(service.host, service.port)
+            if not service.port or self._prober(service.host, service.port)
         ]
         services.sort(key=lambda service: (service.backend, service.port))
         return services
+
+
+def gpu_services(gpu_source=None) -> list:
+    """Services the GPU table already knows, even without a reachable API.
+
+    The vendor table resolves each card-holding PID to its launcher's model
+    name, so a containerised or other-user server still shows up; its port
+    stays unknown (``0``) until the API can be found.
+    """
+    if gpu_source is None:
+        try:
+            from .backend import gpu_process_source
+
+            gpu_source = gpu_process_source()
+        except Exception:
+            gpu_source = None
+    try:
+        rows = list(gpu_source()) if gpu_source else []
+    except Exception:
+        rows = []
+    found = {}
+    for row in rows:
+        model = (row.get("model") or "").strip()
+        name = (row.get("name") or "").lower()
+        if not model:
+            continue
+        backend = "sglang" if "sglang" in name else "vllm"
+        key = (backend, model)
+        pid = int(row.get("pid") or 0)
+        service = found.get(key)
+        if service is None:
+            found[key] = Service(
+                backend=backend,
+                family=_BY_KEY[backend].family,
+                host=LOCAL_HOST,
+                port=0,
+                model=model,
+                pids=(pid,) if pid else (),
+                source="gpu",
+            )
+        elif pid:
+            service.pids = tuple(sorted(set(service.pids) | {pid}))
+    return list(found.values())

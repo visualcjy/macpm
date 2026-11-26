@@ -588,6 +588,16 @@ class ModelFeed:
         thread.start()
 
     def _load(self, service: Service) -> None:
+        if not service.port:
+            with self._lock:
+                if self._service is not None and self._service.identity == service.identity:
+                    self._stats = ModelStats(
+                        state="no-endpoint",
+                        model=service.model,
+                        note="port unknown · pass --model-url host:port",
+                        at=self.clock(),
+                    )
+            return
         try:
             stats = self._fetcher(service, _key_for(service.backend))
         except urllib.error.HTTPError as error:
