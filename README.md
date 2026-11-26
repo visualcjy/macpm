@@ -1,5 +1,7 @@
 # macpm
 
+[English](README.md) · [简体中文](README.zh-CN.md)
+
 **Performance monitoring CLI for Apple Silicon — and now Linux.**<br>
 On macOS, macpm reads the same hardware counters as `powermetrics`, but through
 IOReport/IOKit/SMC — no `sudo`, no password, no privileged helper.  On Linux it
@@ -9,6 +11,20 @@ readings need root.
 A Python-based `nvtop`-inspired terminal monitor for Apple Silicon Macs,
 forked from [asitop](https://github.com/tlkh/asitop), with an x86_64/arm64
 Linux backend.
+
+## What's new in 3.4
+
+- **Model view (key `6`)** for local LLM servers: vLLM, SGLang, llama.cpp,
+  ollama, oMLX and Splash.  It discovers services from the process table, the
+  GPU table and published container ports, polls only the selected service,
+  and reads per-request rows from the server's own log when one is available.
+  See [Model view](#model-view).
+- **Multi-GPU numbers are real numbers.**  On an 8-card host the GPU boxes and
+  the service table now aggregate the cards a service actually holds, and card
+  names are normalised (`NV RTX 4090`).
+- **Container-aware logs**: a `docker logs` command, a kubelet log file, the
+  Kubernetes API, or a container's json file — no kubectl required on the GPU
+  node.
 
 ## What's new in 3.3
 
@@ -84,6 +100,9 @@ Network view (press `4` while running):
 - GPU view (`5`) with utilisation, clock, power, VRAM, temperature and the
   processes using the GPU, ranked by GPU time; AMD/Intel cards also show each
   process's VRAM/GTT and the card it holds
+- Model view (`6`) for local inference servers: model, decode/prefill rate,
+  KV and context use, time-to-first-token, recent requests and the cards the
+  service holds; see [Model view](#model-view)
 - Key-hint footer in every view; the default view puts the network identity
   (interface, CIDR, gateway, public IP and city) on the Network IO box's bottom
   border, and the key hints are a plain line below it
@@ -429,6 +448,69 @@ Notes:
 - The default view's GPU gauge shows the busiest card and appends `(max of N)`
   when the machine has more than one.
 
+## Model view
+
+Press `6` for the model-serving view.  It answers "which models are being
+served here, on which cards, and how fast are they right now" without asking
+the servers anything until you select one.
+
+**Discovery is HTTP-free.**  Each service comes from one of three sources:
+
+| Source | What it contributes |
+|---|---|
+| Process table | the launcher command line (`vllm serve …`, `sglang.launch_server …`, `llama-server`, `ollama serve`, oMLX, Splash) and its `--port` |
+| GPU table | which cards and how much VRAM each card-holding PID owns, plus the served model name |
+| Published container ports | `docker ps` port mappings, when the image identifies a backend |
+
+Candidate rows are grouped by network namespace — a launcher and its tensor-
+parallel workers are one service, while two servers of the same model on
+different cards stay two rows.  Endpoints are then resolved **inside that
+namespace** (`/proc/<pid>/net/tcp`, descending into the container when run as
+root) and confirmed with `GET /v1/models`: the model name and the backend come
+from that answer (`id` and `owned_by`), never from a guess.
+
+**Polling.**  Only the selected service is polled (once per second); the rest
+only get a cheap `/v1/models` probe every five seconds so the STATE column
+stays meaningful.  Nothing is written to any server.
+
+**Per backend:**
+
+| Backend | What it can read | Keys |
+|---|---|---|
+| Splash | `/status`, plus per-request rows from `~/Library/Logs/Splash/server.log` (prompt/output/cached tokens, TTFT, tok/s) | `SPLASH_LOG` |
+| llama.cpp | `/props`, `/metrics`, `/slots` | — |
+| vLLM | `/metrics` counters (prefill/decode rates, running/waiting, KV); the `Engine 000:` log line also provides prefix-cache hit rate and running counts | — |
+| SGLang | `/metrics` + `/get_server_info` when enabled; otherwise the model only | — |
+| oMLX | `/admin/api/activity` (current request only) | — |
+| ollama | `/api/ps` — the loaded models, no throughput | — |
+
+When a server does not expose `/metrics` (SGLang often ships with it off), the
+view stays useful: model, endpoint, context limit and the GPU boxes remain, and
+the note says `metrics endpoint unavailable` rather than pretending.
+
+**Reading rows from a log file or a container** (optional, one variable per
+backend, prefix `SPLASH_`, `VLLM_`, `SGLANG_`, `OLLAMA_`, `LLAMACPP_`):
+
+```sh
+VLLM_LOG=/var/log/vllm/server.log                     # a file on this host
+VLLM_LOG_CMD="docker logs --since=10s vllm-qwen"      # any command, re-run and deduped
+VLLM_DOCKER=vllm-qwen                                 # docker inspect → its json log
+VLLM_POD=deploy-model93                               # newest /var/log/pods/…/0.log
+VLLM_K8S_POD=deploy-model93                           # the Kubernetes log API
+K8S_APISERVER=https://10.0.0.1:6443 K8S_TOKEN=…       # …with a token (kubeconfig works too)
+VLLM_LOG_URL=http://127.0.0.1:8080/admin/api/logs     # any text log endpoint
+```
+
+**What the boxes show.**  Decode and prefill rates, GPU load / VRAM / GPU
+temperature / power for **the cards the selected service holds** (the subtitle
+says how many, e.g. `2x NV RTX 4090`), context use and the recent-request list.
+Cards whose PIDs cannot be attributed fall back to all cards, and the subtitle
+then says so by listing the full count.
+
+**Manual endpoints.**  `--model-url host:port` adds a service that discovery
+missed (repeatable), which is the escape hatch for a server that only listens
+inside another namespace.
+
 ## Compatibility
 
 Tested on macOS 27.2 with an M3 Max.  Behaviour depends more on the chip
@@ -681,6 +763,20 @@ Release steps are documented in [RELEASE.md](https://github.com/visualcjy/macpm/
   sane umask (`sudo sh -c 'umask 022; pip install --force-reinstall macpm'`),
   install with `pip install --user`, or fix the modes (`sudo chmod -R a+rX
   /usr/local/lib/python3.*/dist-packages/macpm*` and the dependencies).
+
+- **Model view lists nothing** — discovery needs to see the launcher process or
+  the GPU table.  In a container on a node where you are not root, run
+  `sudo -E macpm` so `/proc/<pid>/net/tcp` and `nvidia-smi` are complete; a
+  service that still cannot be found can be added with `--model-url host:port`.
+- **Model view shows `?` instead of an endpoint** — the port could not be
+  resolved inside that namespace (no permission) or no API answered.  The GPU
+  data is still real; the row becomes pollable once `--model-url` names it.
+- **Selected model shows `metrics endpoint unavailable`** — the server answered
+  `/v1/models` but not `/metrics` (common with SGLang).  Start the backend with
+  metrics enabled to get rates; the model, context limit and GPU boxes work
+  regardless.
+- **`STATE` stays `unverified`** — the five-second `/v1/models` probe cannot
+  reach that pod IP from this host; the selected row will also fail to poll.
 
 ## Changelog
 
