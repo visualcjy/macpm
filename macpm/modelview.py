@@ -134,17 +134,26 @@ def _bar(percent, width: int = 20) -> str:
     return "\u2589" * filled + "\u2591" * (width - filled)
 
 
+_CARD_BRANDS = {"nvidia": "NV", "amd": "AMD", "intel": "Intel", "apple": "Apple"}
+_CARD_SERIES = {"geforce", "radeon", "arc", "xtx", "xt"}
+
+
 def _short_card(name: str) -> str:
-    """``NVIDIA GeForce RTX 4090`` → ``RTX 4090``."""
-    name = (name or "").strip()
-    changed = True
-    while changed:
-        changed = False
-        for prefix in ("NVIDIA ", "AMD ", "Intel ", "GeForce ", "Radeon "):
-            if name.startswith(prefix):
-                name = name[len(prefix):].strip()
-                changed = True
-    return name or "-"
+    """``NVIDIA GeForce RTX 4090`` → ``NV RTX 4090``.
+
+    The brand stays (normalised), the marketing series does not.
+    """
+    tokens = [token for token in (name or "").split() if token]
+    if not tokens:
+        return "-"
+    brand = ""
+    first = tokens[0].lower()
+    if first in _CARD_BRANDS:
+        brand = _CARD_BRANDS[first]
+        tokens = tokens[1:]
+    tokens = [token for token in tokens if token.lower() not in _CARD_SERIES]
+    text = " ".join(([brand] if brand else []) + tokens).strip()
+    return text or "-"
 
 
 def _cards_text(cards: list) -> str:

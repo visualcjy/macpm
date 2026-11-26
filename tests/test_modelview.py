@@ -213,6 +213,15 @@ class RenderTests(unittest.TestCase):
             self.assertIn(title, output)
 
 
+
+    def test_card_names_keep_the_brand_and_drop_the_series(self):
+        from macpm.modelview import _short_card
+
+        self.assertEqual(_short_card("NVIDIA GeForce RTX 4090"), "NV RTX 4090")
+        self.assertEqual(_short_card("AMD Radeon RX 7900 XTX"), "AMD RX 7900")
+        self.assertEqual(_short_card("Intel Arc A770"), "Intel A770")
+        self.assertEqual(_short_card("Apple M3 Max"), "Apple M3 Max")
+
     def test_multi_gpu_cards_aggregate_vram_and_temperature(self):
         parse = {
             "processor": {"clusters": [], "combined_power": 0},
