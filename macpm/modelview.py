@@ -292,7 +292,7 @@ class ModelView:
         elif len(ordered) == 1:
             lines = self._detail_lines(ordered[0], inner, stats)
             detail_height = min(height - 2, len(lines) + 2)
-            grid = self._grid(parse, args, sensors, stats, width, height - 2 - detail_height)
+            grid = self._grid(parse, args, sensors, stats, width, height - 2 - detail_height, ordered[0])
             out += self._box(term, 0, width, detail_height,
                              " MODEL SERVICE · {} ".format(ordered[0].label), lines, palette)
             top = detail_height
@@ -313,7 +313,7 @@ class ModelView:
                                  lines, palette)
                 below = height - 2 - list_height - detail_height
                 if below >= 10:
-                    grid = self._grid(parse, args, sensors, stats, width, below)
+                    grid = self._grid(parse, args, sensors, stats, width, below, detail)
                     for index, spans in enumerate(grid):
                         out.append(term.move(list_height + detail_height + index, 0)
                                    + paint_spans(spans, palette, width))
@@ -442,6 +442,15 @@ class ModelView:
             rows = {}
         self._gpu, self._gpu_at = rows, now
         return rows
+
+    def _service_cards(self, service) -> set:
+        index = self._gpu_index()
+        cards = set()
+        for pid in getattr(service, "pids", ()):
+            entry = index.get(pid)
+            if entry:
+                cards.update(entry[0])
+        return cards
 
     def _service_gpu(self, service: Service):
         index = self._gpu_index()
@@ -606,7 +615,7 @@ class ModelView:
 
     # -- wide eight-card grid (form C) -------------------------------------
 
-    def _grid_cards(self, parse, args, sensors, stats):
+    def _grid_cards(self, parse, args, sensors, stats, service=None):
         interval = max(0.05, float(getattr(args, "interval", 1) or 1))
         processor = (parse or {}).get("processor") or {}
         gpu = (parse or {}).get("gpu") or {}
@@ -624,6 +633,9 @@ class ModelView:
         gpu_w = (processor.get("gpu_energy") or 0.0) / 1000.0 / interval
         total_w = (processor.get("combined_power") or 0.0) / 1000.0 / interval
         cards = (parse or {}).get("gpus") or gpu.get("cards") or []
+        mine = self._service_cards(service) if service is not None else set()
+        if mine and cards:
+            cards = [c for c in cards if c.get("index") in mine] or cards
         temp = getattr(sensors, "gpu_c", None) if sensors is not None else None
         if cards:
             temps = [c.get("temp_c") for c in cards if c.get("temp_c")]
@@ -676,8 +688,9 @@ class ModelView:
              "write {}".format(_format_rate(disk.get("wbytes_per_s"))), "chart", read or 0.0, None),
         ]
 
-    def _grid(self, parse, args, sensors, stats, width: int, height: int) -> list:
-        cards = self._grid_cards(parse, args, sensors, stats)
+    def _grid(self, parse, args, sensors, stats, width: int, height: int,
+              service=None) -> list:
+        cards = self._grid_cards(parse, args, sensors, stats, service)
         if width >= 100:
             columns, count = 4, 8
         elif width >= 56:
