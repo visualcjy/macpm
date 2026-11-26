@@ -134,6 +134,19 @@ def _bar(percent, width: int = 20) -> str:
     return "\u2589" * filled + "\u2591" * (width - filled)
 
 
+def _short_card(name: str) -> str:
+    """``NVIDIA GeForce RTX 4090`` → ``RTX 4090``."""
+    name = (name or "").strip()
+    changed = True
+    while changed:
+        changed = False
+        for prefix in ("NVIDIA ", "AMD ", "Intel ", "GeForce ", "Radeon "):
+            if name.startswith(prefix):
+                name = name[len(prefix):].strip()
+                changed = True
+    return name or "-"
+
+
 def _cards_text(cards: list) -> str:
     if not cards:
         return "-"
@@ -654,7 +667,10 @@ class ModelView:
                 gpu_pct = sum(busy) / len(busy)
             names = {(c.get("name") or "").strip() for c in cards if c.get("name")}
             if len(cards) > 1 and names:
-                gpu["name"] = "{}x {}".format(len(cards), sorted(names)[0])
+                gpu["name"] = "{}x {}".format(
+                    len(cards), _short_card(sorted(names)[0]))
+            elif names:
+                gpu["name"] = _short_card(sorted(names)[0])
         speed = None if stats is None else (stats.decode_observed
                                          if stats.decode_observed is not None else stats.decode_tps)
         read = disk.get("rbytes_per_s")
