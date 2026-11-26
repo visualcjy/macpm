@@ -1441,6 +1441,7 @@ def begin(stdscr, sampler):
                             registry=ServiceRegistry(
                                 manual=args.model_url,
                                 container_source=_docker_services(),
+                                validate_api=True,
                             ),
                             no_color=args.no_color,
                             native=getattr(args, "native", False),

@@ -211,6 +211,8 @@ class ServiceRegistry:
         manual: Iterable[str] = (),
         container_source: Optional[Callable[[], list]] = None,
         gpu_source: Optional[Callable[[], list]] = None,
+        validate_api: bool = False,
+        api_probe: Optional[Callable[[str, int], bool]] = None,
     ):
         self.clock = clock
         self.ttl = max(0.0, float(ttl))
@@ -219,6 +221,9 @@ class ServiceRegistry:
         self._manual = [item for item in (manual or ()) if item]
         self._container_source = container_source
         self._gpu_source = gpu_source
+        self.validate_api = validate_api
+        self._api_probe = api_probe or _api_probe
+        self._endpoints: dict = {}
         self._services: list = []
         self._cached_at = -1e9
         self.error = ""
@@ -237,6 +242,11 @@ class ServiceRegistry:
 
     def _fill_endpoint(self, service) -> None:
         """Give a GPU-discovered service a real endpoint when we can see one."""
+        cache_key = (service.backend, service.model, service.pids)
+        cached = self._endpoints.get(cache_key)
+        if cached:
+            service.host, service.port = cached
+            return
         preferred = {8000, 8001, 8002, 8010, 8080, 9931, 11434, 30000, 30001}
         for pid in service.pids:
             listeners = netns_listeners(pid)
@@ -257,6 +267,7 @@ class ServiceRegistry:
                         host = address
                 if self._prober(host, port):
                     service.host, service.port = host, port
+                    self._endpoints[cache_key] = (host, port)
                     return
 
     def _scan(self) -> list:
@@ -337,6 +348,14 @@ class ServiceRegistry:
             key = ((service.backend, service.port) if service.port
                    else (service.backend, service.model, service.pids))
             groups.setdefault(key, service)
+
+        if self.validate_api:
+            groups = {
+                key: service
+                for key, service in groups.items()
+                if service.source == "gpu" or not service.port
+                or self._api_probe(service.host, service.port)
+            }
 
         services = [
             service
@@ -439,3 +458,18 @@ def netns_address(pid: int) -> str:
             if not address.startswith("127."):
                 return address
     return ""
+
+
+def _api_probe(host: str, port: int, timeout: float = 1.2) -> bool:
+    """Does this endpoint answer an OpenAI-style API (or ask for a key)?"""
+    import urllib.error
+    import urllib.request
+
+    url = "http://{}:{}/v1/models".format(host, port)
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as response:
+            return getattr(response, "status", 200) == 200
+    except urllib.error.HTTPError as error:
+        return error.code in (401, 403)
+    except (OSError, ValueError):
+        return False

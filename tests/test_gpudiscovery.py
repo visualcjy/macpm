@@ -40,3 +40,25 @@ class GpuDiscoveryTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ApiValidationTests(unittest.TestCase):
+    def test_services_without_an_api_are_dropped(self):
+        registry = ServiceRegistry(
+            process_source=lambda: [],
+            prober=lambda host, port: True,
+            container_source=lambda: [("vllm", 9000, "c", "vllm/x")],
+            validate_api=True,
+            api_probe=lambda host, port: False,
+        )
+        self.assertEqual(registry.discover(force=True), [])
+
+    def test_a_live_api_is_kept(self):
+        registry = ServiceRegistry(
+            process_source=lambda: [],
+            prober=lambda host, port: True,
+            container_source=lambda: [("vllm", 9000, "c", "vllm/x")],
+            validate_api=True,
+            api_probe=lambda host, port: True,
+        )
+        self.assertEqual(len(registry.discover(force=True)), 1)

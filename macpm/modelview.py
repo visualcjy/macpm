@@ -310,6 +310,12 @@ class ModelView:
                 out += self._box(term, list_height, width, detail_height,
                                  " {} · {} ".format(detail.label, detail.endpoint),
                                  lines, palette)
+                below = height - 2 - list_height - detail_height
+                if below >= 10:
+                    grid = self._grid(parse, args, sensors, stats, width, below)
+                    for index, spans in enumerate(grid):
+                        out.append(term.move(list_height + detail_height + index, 0)
+                                   + paint_spans(spans, palette, width))
 
         text = _FOOTER_PAUSED if self.paused else _FOOTER
         fitted = _fit(text, max(0, width - 2))
