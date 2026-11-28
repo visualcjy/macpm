@@ -1,4 +1,4 @@
-# Releasing macpm 3.3.1
+# Releasing macpm 3.4.0
 
 This checklist prepares a GitHub tag and a PyPI upload.  It does not push or
 publish anything by itself.
@@ -7,11 +7,11 @@ publish anything by itself.
 
 - macOS Apple Silicon, Python 3.9+.
 - Clean working tree (`git status`), all tests passing.
-- Version is `3.3.1` in:
+- Version is `3.4.0` in:
   - `setup.py`
   - `macpm/__init__.py` (`__version__`)
   - the banner and `--version` derive from it (`macpm/macpm.py`)
-- `CHANGELOG.md` has the `3.3.1` entry.
+- `CHANGELOG.md` has the `3.4.0` entry.
 
 ## 2. Test from source
 
@@ -84,7 +84,7 @@ python3 -m twine upload --non-interactive \
 Then verify:
 
 ```sh
-python3 -m pip install --upgrade macpm==3.3.1
+python3 -m pip install --upgrade macpm==3.4.0
 macpm --version
 ```
 
@@ -93,8 +93,8 @@ macpm --version
 ```sh
 git add setup.py pyproject.toml MANIFEST.in README.md CHANGELOG.md RELEASE.md \
         macpm packaging tests .github bin
-git commit -m "Release macpm 3.3.1: macOS 27 power fallback and GPU sort fixes"
-git tag -a v3.3.1 -m "macpm 3.3.1"
+git commit -m "Release macpm 3.4.0: macOS 27 power fallback and GPU sort fixes"
+git tag -a v3.3.1 -m "macpm 3.4.0"
 git push origin main
 git push origin v3.3.1
 ```

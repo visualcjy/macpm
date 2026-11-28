@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 3.4.0 — 2026-11-28
 
 ### Added
 - Model view discovery is now organised around **network namespaces**: one

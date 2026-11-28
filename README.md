@@ -357,7 +357,7 @@ shows `n/a` and the reason stays in the data
 
 A single-GPU machine keeps the older layout: card summary on top, process table
 below.  Every view's footer starts with the app name and version
-(`macpm v3.3.1 · q quit …`).
+(`macpm v3.4.0 · q quit …`).
 
 ```text
 ┌ GPU INFO ────────────────────────────────────────────────────────────────────────────────┐
@@ -371,7 +371,7 @@ below.  Every view's footer starts with the app name and version
 │       └ 222 Xorg 2.0G                                                                    │
 │   2 AMD GPU (amdgpu)          ▉▉▉▉▏▏  60% 1100/1750   12.0W  ▉▉▉▉▏▏▏▏▏▏  3.0G/8.0G  46°C │
 │   3 AMD GPU (amdgpu)          ▉▉▉▉▉▏  85% 1200/1750   12.0W  ▉▉▉▉▉▏▏▏▏▏  4.0G/8.0G  49°C │
-└ macpm v3.3.1 · q quit  1-5 view  s sort  ↑/↓ page  Space pause  ←/→ colour ────────────────┘
+└ macpm v3.4.0 · q quit  1-5 view  s sort  ↑/↓ page  Space pause  ←/→ colour ────────────────┘
 ```
 
 | Platform | What fills each row |
