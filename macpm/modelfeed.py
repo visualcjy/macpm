@@ -157,6 +157,10 @@ def _key_for(backend: str) -> str:
 def parse_splash(payload: dict, at: float = 0.0) -> ModelStats:
     """Splash ``GET /status`` → one card's worth of numbers."""
     stats = ModelStats(state="live", at=at)
+    instance = payload.get("instance") or {}
+    stats.model = str(instance.get("model") or "")
+    if not stats.ctx_total:
+        stats.ctx_total = _int(payload.get("maximum_context_tokens"))
     metrics = payload.get("metrics") or {}
     stats.decode_tps = _number(metrics.get("decode_tokens_per_second"))
     stats.prefill_tps = _number(metrics.get("prefill_tokens_per_second"))
@@ -207,7 +211,8 @@ def parse_splash(payload: dict, at: float = 0.0) -> ModelStats:
     stats.failed = _int(requests.get("failed"))
     stats.thermal = str(payload.get("thermal_state") or "")
     model = payload.get("model") or payload.get("model_name") or ""
-    stats.model = str(model)
+    if model:                      # some builds report it in ``instance`` only
+        stats.model = str(model)
     if not payload.get("ready", True):
         stats.state = "stale"
         stats.note = "engine not ready"

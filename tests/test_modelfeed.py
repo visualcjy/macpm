@@ -298,6 +298,20 @@ class MockServerTests(unittest.TestCase):
         self.assertEqual(stats.kv_pct, 78.0)
 
 
+
+    def test_splash_model_comes_from_the_instance_block(self):
+        stats = parse_splash({
+            "instance": {"model": "unsloth/Inkling-2-Mini-GGUF:UD-Q4_K_M"},
+            "maximum_context_tokens": 320529,
+            "metrics": {},
+        })
+        self.assertEqual(stats.model, "unsloth/Inkling-2-Mini-GGUF:UD-Q4_K_M")
+        self.assertEqual(stats.ctx_total, 320529)
+
+    def test_a_top_level_model_still_wins(self):
+        stats = parse_splash({"model": "explicit", "instance": {"model": "old"}})
+        self.assertEqual(stats.model, "explicit")
+
     def test_vllm_ttft_is_an_average_not_a_percentile(self):
         stats = parse_vllm({
             "vllm:time_to_first_token_seconds_sum": 1.0,
