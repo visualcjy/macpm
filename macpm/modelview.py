@@ -694,7 +694,18 @@ class ModelView:
         gpu_pct = pct(gpu.get("idle_ratio"))
         cpu_pct = None
         if clusters:
-            cpu_pct = sum(pct(c.get("idle_ratio")) or 0.0 for c in clusters) / len(clusters)
+            idle_sum, core_count = 0.0, 0
+            for cluster in clusters:
+                cpus = cluster.get("cpus") or []
+                if cpus:
+                    for cpu in cpus:
+                        idle_sum += cpu.get("idle_ratio") or 0.0
+                        core_count += 1
+                else:
+                    idle_sum += cluster.get("idle_ratio") or 0.0
+                    core_count += 1
+            if core_count:
+                cpu_pct = (1.0 - idle_sum / core_count) * 100.0
         cpu_w = (processor.get("cpu_energy") or 0.0) / 1000.0 / interval
         gpu_w = (processor.get("gpu_energy") or 0.0) / 1000.0 / interval
         total_w = (processor.get("combined_power") or 0.0) / 1000.0 / interval

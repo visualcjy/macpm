@@ -227,6 +227,30 @@ class RenderTests(unittest.TestCase):
         self.assertTrue(all(role == MUTED for text, role in spans
                             if "p50" in text or "p95" in text))
 
+
+    def test_cpu_load_is_weighted_by_cores_not_by_cluster(self):
+        parse = {
+            "processor": {"clusters": [
+                {"name": "E", "idle_ratio": 0.95,
+                 "cpus": [{"idle_ratio": 0.95}] * 8},
+                {"name": "P", "idle_ratio": 0.05,
+                 "cpus": [{"idle_ratio": 0.05}] * 4},
+            ], "combined_power": 0},
+            "gpu": {"idle_ratio": 0.5},
+            "disk": {},
+        }
+        view = ModelView(registry=FakeRegistry([vllm()]), feed=FakeFeed(),
+                         no_color=True, gpu_source=lambda: [])
+        view.prime()
+        os.environ["COLUMNS"] = "110"
+        os.environ["LINES"] = "34"
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            view.display(parse, types.SimpleNamespace(interval=1), None)
+        # weighted: 1 - (0.95*8 + 0.05*4) / 12 = 35 %; the old cluster
+        # average said 50 %.
+        self.assertIn("35 %", buffer.getvalue())
+
     def test_heat_roles_follow_the_gpu_view(self):
         from macpm.modelview import _heat_role
         from macpm.theme import CRIT, OK, WARN
