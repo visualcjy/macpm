@@ -39,6 +39,7 @@ _FOOTER_PAUSED = footer("q quit  1-6 view  \u2191/\u2193 select  s sort  Space r
 
 _SORTS = ("port", "backend", "model")
 _VALUE_TOKEN = re.compile(r"\d+(?:\.\d+)?[A-Za-z%]*")
+_TIMING_TOKEN = re.compile(r"(?<![\w.])\d+(?:\.\d+)?\s?(?:ms|s|µs|m)\b")
 _STATE_WIDTH = 14
 
 
@@ -48,6 +49,19 @@ def _service_sort_key(sort: str):
     if sort == "backend":
         return lambda service: (service.backend, service.model.lower(), service.port)
     return lambda service: (service.port, service.backend, service.model.lower())
+
+
+def _timing_spans(text: str, base: str = MUTED) -> list:
+    """Highlight durations only — ``p50``/``p95`` stay dim."""
+    spans, position = [], 0
+    for match in _TIMING_TOKEN.finditer(text):
+        if match.start() > position:
+            spans.append((text[position:match.start()], base))
+        spans.append((match.group(0), VALUE))
+        position = match.end()
+    if position < len(text):
+        spans.append((text[position:], base))
+    return spans or [(text, base)]
 
 
 def _value_spans(text: str, base: str = LABEL) -> list:
@@ -525,6 +539,9 @@ class ModelView:
                 spans = [(_fit(value, inner - 10), role)]
             return [(_pad(name, 10), KEY)] + spans
 
+        def timing(name: str, value: str) -> list:
+            return [(_pad(name, 10), KEY)] + _timing_spans(_fit(value, inner - 10))
+
         model = (stats.model if stats and stats.model else service.model) or "-"
         lines = [
             field("model", model, LABEL),
@@ -534,7 +551,7 @@ class ModelView:
         ]
         recent = []
         if stats is not None and stats.state == "live":
-            extra, recent = self._metric_lines(stats, field, service)
+            extra, recent = self._metric_lines(stats, field, service, timing)
             lines += extra
         lines = self._pair(lines)
         for row in recent:
@@ -582,7 +599,8 @@ class ModelView:
             return "stale"
         return "error"
 
-    def _metric_lines(self, stats: ModelStats, field, service: Service) -> tuple:
+    def _metric_lines(self, stats: ModelStats, field, service: Service,
+                      timing=None) -> tuple:
         lines = []
         lines.append(field("decode", _rate(stats.decode_tps)))
         lines.append(field("prefill", _rate(stats.prefill_tps)))
@@ -595,9 +613,10 @@ class ModelView:
         if stats.ttft_p50_ms is not None:
             ttft = "{} p50 · {} p95".format(
                 _ttft(stats.ttft_p50_ms), _ttft(stats.ttft_p95_ms))
-            lines.append(field("ttft", ttft))
+            lines.append(timing("ttft", ttft) if timing else field("ttft", ttft))
         elif stats.ttft_avg_ms is not None:
-            lines.append(field("ttft", "{} avg".format(_ttft(stats.ttft_avg_ms))))
+            ttft = "{} avg".format(_ttft(stats.ttft_avg_ms))
+            lines.append(timing("ttft", ttft) if timing else field("ttft", ttft))
         if stats.ctx_total:
             if stats.ctx_used:
                 text = "{} / {}".format(_tokens(stats.ctx_used), _tokens(stats.ctx_total))
@@ -792,7 +811,7 @@ class ModelView:
         out = [top,
                [("\u2502 ", None)] + big_spans + [(" \u2502", None)],
                [("\u2502 ", None)]
-               + ([(_pad(sub, inner), LABEL)] if key == "disk"
+               + ([(_pad(sub, inner), LABEL)] if key in ("disk", "gpu")
                   else _value_spans(_pad(sub, inner))) + [(" \u2502", None)]]
         chart_rows = max(0, height - 4)
         history = self._history.get(key, [])

@@ -215,6 +215,18 @@ class RenderTests(unittest.TestCase):
 
 
 
+
+    def test_ttft_marks_durations_but_not_percentile_names(self):
+        from macpm.modelview import _timing_spans
+        from macpm.theme import MUTED, VALUE
+
+        spans = _timing_spans("1.32s p50 · 18.65s p95")
+        roles = dict(spans)
+        self.assertEqual(roles["1.32s"], VALUE)
+        self.assertEqual(roles["18.65s"], VALUE)
+        self.assertTrue(all(role == MUTED for text, role in spans
+                            if "p50" in text or "p95" in text))
+
     def test_heat_roles_follow_the_gpu_view(self):
         from macpm.modelview import _heat_role
         from macpm.theme import CRIT, OK, WARN
