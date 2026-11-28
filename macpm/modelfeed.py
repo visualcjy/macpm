@@ -49,6 +49,7 @@ class ModelStats:
     phases: dict = field(default_factory=dict)
     ttft_p50_ms: Optional[float] = None
     ttft_p95_ms: Optional[float] = None
+    ttft_avg_ms: Optional[float] = None
     slots_used: Optional[int] = None
     slots_total: Optional[int] = None
     tokens_total: Optional[int] = None
@@ -311,7 +312,7 @@ def parse_vllm(metrics: dict, model: str = "") -> ModelStats:
     count = metrics.get("vllm:time_to_first_token_seconds_count")
     if total is not None and count:
         avg = total / count * 1000.0
-        stats.ttft_p50_ms = avg
+        stats.ttft_avg_ms = avg
     return stats
 
 
@@ -331,7 +332,7 @@ def parse_sglang(metrics: dict, info: dict = None) -> ModelStats:
     total = metrics.get("sglang:time_to_first_token_seconds_sum")
     count = metrics.get("sglang:time_to_first_token_seconds_count")
     if total is not None and count:
-        stats.ttft_p50_ms = total / count * 1000.0
+        stats.ttft_avg_ms = total / count * 1000.0
     return stats
 
 

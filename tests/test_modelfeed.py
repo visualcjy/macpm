@@ -297,6 +297,15 @@ class MockServerTests(unittest.TestCase):
         self.assertEqual(stats.active, 5)
         self.assertEqual(stats.kv_pct, 78.0)
 
+
+    def test_vllm_ttft_is_an_average_not_a_percentile(self):
+        stats = parse_vllm({
+            "vllm:time_to_first_token_seconds_sum": 1.0,
+            "vllm:time_to_first_token_seconds_count": 4,
+        })
+        self.assertEqual(stats.ttft_avg_ms, 250.0)
+        self.assertIsNone(stats.ttft_p50_ms)
+
     def test_vllm_without_metrics_still_reports_the_model(self):
         MockHandler.routes = {"/metrics": ({"error": "not found"}, 404),
                               "/v1/models": ({"data": [{"id": "Qwen3-Embedding-8B",

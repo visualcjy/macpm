@@ -214,6 +214,19 @@ class RenderTests(unittest.TestCase):
 
 
 
+
+    def test_heat_roles_follow_the_gpu_view(self):
+        from macpm.modelview import _heat_role
+        from macpm.theme import CRIT, OK, WARN
+
+        self.assertEqual(_heat_role("gpu", 40), OK)
+        self.assertEqual(_heat_role("gpu", 75), WARN)
+        self.assertEqual(_heat_role("gpu", 95), CRIT)
+        self.assertEqual(_heat_role("temp", 70), OK)
+        self.assertEqual(_heat_role("temp", 85), WARN)
+        self.assertEqual(_heat_role("temp", 95), CRIT)
+        self.assertEqual(_heat_role("speed", 999), OK)
+
     def test_card_names_keep_the_brand_and_drop_the_series(self):
         from macpm.modelview import _short_card
 

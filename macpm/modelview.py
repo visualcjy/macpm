@@ -138,6 +138,21 @@ _CARD_BRANDS = {"nvidia": "NV", "amd": "AMD", "intel": "Intel", "apple": "Apple"
 _CARD_SERIES = {"geforce", "radeon", "arc", "xtx", "xt"}
 
 
+def _heat_role(key: str, value) -> str:
+    """Warm numbers turn amber, then red — same thresholds as the GPU view."""
+    if value is None:
+        return OK
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return OK
+    if key == "temp":
+        return CRIT if value >= 90 else WARN if value >= 80 else OK
+    if key in ("gpu", "cpu", "vram", "ctx"):
+        return CRIT if value >= 90 else WARN if value >= 70 else OK
+    return OK
+
+
 def _short_card(name: str) -> str:
     """``NVIDIA GeForce RTX 4090`` → ``NV RTX 4090``.
 
@@ -514,7 +529,8 @@ class ModelView:
         lines = [
             field("model", model, LABEL),
             field("endpoint", service.endpoint, ADDRESS),
-            field("state", self._state_detail(stats), MUTED),
+            [(_pad("state", 10), KEY)]
+            + _value_spans(_fit(self._state_detail(stats), inner - 10), MUTED),
         ]
         recent = []
         if stats is not None and stats.state == "live":
@@ -523,9 +539,10 @@ class ModelView:
         lines = self._pair(lines)
         for row in recent:
             if isinstance(row, tuple):
-                label, label_role, value, value_role = row
-                lines.append([(label, label_role), (_fit(value, inner - len(label)),
-                                                    value_role)])
+                label, head, value = row
+                lines.append([(label, KEY), (head + "  ", MUTED)]
+                             + _value_spans(_fit(value, inner - len(label) - len(head) - 2),
+                                            MUTED))
             else:
                 lines.append([(_fit(str(row), inner), MUTED)])
         if stats is not None and stats.note:
@@ -577,9 +594,10 @@ class ModelView:
             lines.append(field("slots", text))
         if stats.ttft_p50_ms is not None:
             ttft = "{} p50 · {} p95".format(
-                _ttft(stats.ttft_p50_ms), _ttft(stats.ttft_p95_ms)
-            )
+                _ttft(stats.ttft_p50_ms), _ttft(stats.ttft_p95_ms))
             lines.append(field("ttft", ttft))
+        elif stats.ttft_avg_ms is not None:
+            lines.append(field("ttft", "{} avg".format(_ttft(stats.ttft_avg_ms))))
         if stats.ctx_total:
             if stats.ctx_used:
                 text = "{} / {}".format(_tokens(stats.ctx_used), _tokens(stats.ctx_total))
@@ -625,9 +643,11 @@ class ModelView:
         if not recent:
             recent_rows.append("recent    -- waiting for the next completed request")
         for index, row in enumerate(recent):
-            text = "{}  {}  out {}  {}  {}".format(
+            head = "{}  {}".format(
                 time.strftime("%H:%M:%S", time.localtime(row.started or row.finished)),
                 row.status,
+            )
+            text = "out {}  {}  {}".format(
                 _tokens(row.output),
                 _rate(row.tps) if row.tps else "-",
                 _duration(row.duration),
@@ -636,9 +656,8 @@ class ModelView:
                 _ttft(row.first_ms) if row.first_ms is not None else "--")
             text += "  cached {}".format(
                 _tokens(row.cached) if row.cached else "--")
-            recent_rows.append((
-                ("recent    " if index == 0 else " " * 10), KEY,
-                text, MUTED))
+            recent_rows.append(
+                ("recent    " if index == 0 else " " * 10, head, text))
         return lines, recent_rows
 
     # -- wide eight-card grid (form C) -------------------------------------
@@ -762,11 +781,16 @@ class ModelView:
         dashes = "\u2500" * max(0, width - 5 - len(title))
         top = [("\u250c\u2500 ", None), (title, BOX), (" ", None), (dashes, None), ("\u2510", None)]
         bottom = [("\u2514", None), ("\u2500" * (width - 2), None), ("\u2518", None)]
+        role = _heat_role(key, value)
+        big_spans = _value_spans(_pad(big, inner))
+        if role not in (None, OK):
+            big_spans = [(text, role if text.strip() and any(c.isdigit() for c in text)
+                          else span_role) for text, span_role in big_spans]
         if height <= 3:
-            return [top, [("\u2502 ", None)] + _value_spans(_pad(big, inner))
+            return [top, [("\u2502 ", None)] + big_spans
                     + [(" \u2502", None)], bottom]
         out = [top,
-               [("\u2502 ", None)] + _value_spans(_pad(big, inner)) + [(" \u2502", None)],
+               [("\u2502 ", None)] + big_spans + [(" \u2502", None)],
                [("\u2502 ", None)]
                + ([(_pad(sub, inner), LABEL)] if key == "disk"
                   else _value_spans(_pad(sub, inner))) + [(" \u2502", None)]]
@@ -775,7 +799,7 @@ class ModelView:
         for index in range(chart_rows):
             if kind == "chart":
                 text = self._chart_line(history, inner, chart_rows, index, scale)
-                out.append([("\u2502 ", None), (text, OK), (" \u2502", None)])
+                out.append([("\u2502 ", None), (text, role or OK), (" \u2502", None)])
             else:
                 level = 0.0 if not value else max(0.0, min(1.0, float(value) / 100.0))
                 if index == chart_rows - 1:      # the bar sits on the last row
